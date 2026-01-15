@@ -35,6 +35,23 @@ def safe_divide(n, d):
     return n / d
 
 
+def add_fiscal_fields(df: pd.DataFrame) -> pd.DataFrame:
+    if COL_MONTH_KEY not in df.columns:
+        return df
+    out = df.copy()
+    month = out[COL_MONTH_KEY]
+    fy_end_year = month.dt.year + (month.dt.month >= 7).astype(int)
+    fy_end_year = fy_end_year.where(month.notna())
+    out["FY_End_Year"] = fy_end_year
+    out["FY_Label"] = "FY" + fy_end_year.astype("Int64").astype(str)
+    out.loc[fy_end_year.isna(), "FY_Label"] = None
+    fy_month_index = ((month.dt.month - 7) % 12) + 1
+    out["FY_Month_Index"] = fy_month_index.where(month.notna())
+    out["FY_Quarter"] = "Q" + (((out["FY_Month_Index"] - 1) // 3) + 1).astype("Int64").astype(str)
+    out.loc[out["FY_Month_Index"].isna(), "FY_Quarter"] = None
+    return out
+
+
 def add_task_month_metrics(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["Billable_Rate_Eff"] = out[COL_BILLABLE_RATE]
@@ -182,4 +199,3 @@ def compute_quote_by_task(
     quote["Quoted_Amount_Mode"] = quote[COL_QUOTED_AMOUNT] * quote["Hour_Share"]
     quote.loc[quote["Hour_Share"].isna(), ["Quoted_Time_Mode", "Quoted_Amount_Mode"]] = None
     return quote[[COL_JOB_KEY, COL_TASK_KEY, "Quoted_Time_Mode", "Quoted_Amount_Mode"]]
-

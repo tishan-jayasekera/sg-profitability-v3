@@ -20,6 +20,8 @@ from lib.constants import (
     COL_TASK_KEY,
     REQUIRED_COLUMNS,
 )
+from lib.metrics import add_fiscal_fields, add_task_month_metrics
+from lib.semantic import add_row_type
 
 
 DATA_PATH = Path("data/Unified_Job_Profitability_Full_Data.csv")
@@ -76,4 +78,13 @@ def load_data(path: Path = DATA_PATH) -> pd.DataFrame:
         elif dept_quote is not None:
             df["Department_Eff"] = dept_quote
 
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_data_enriched(path: Path = DATA_PATH) -> pd.DataFrame:
+    df = load_data(path)
+    df = add_row_type(df)
+    df = add_task_month_metrics(df)
+    df = add_fiscal_fields(df)
     return df

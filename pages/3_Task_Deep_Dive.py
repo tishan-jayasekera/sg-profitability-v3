@@ -14,10 +14,10 @@ from lib.constants import (
     COL_QUOTED_TIME,
     COL_TASK_KEY,
 )
-from lib.data_loader import load_data
-from lib.metrics import add_task_month_metrics, compute_quote_by_task, safe_divide
+from lib.data_loader import load_data_enriched
+from lib.metrics import compute_quote_by_task, safe_divide
 from lib.qa import render_data_integrity
-from lib.semantic import add_row_type, build_dim_job_month, build_dim_job_task_quote
+from lib.semantic import build_dim_job_month, build_dim_job_task_quote
 from lib.ui import apply_filters, render_sidebar
 
 
@@ -60,7 +60,7 @@ st.set_page_config(page_title="Task Deep Dive", layout="wide")
 st.title("Task Deep Dive")
 st.caption("Investigate task profitability, rate evolution, and diagnostics.")
 
-df = add_row_type(load_data())
+df = load_data_enriched()
 filters = render_sidebar(df)
 df_filtered = apply_filters(df, filters)
 
@@ -85,21 +85,16 @@ if task_apply:
 job_key = st.session_state.get("task_job_selected", job_key)
 df_job = df_filtered[df_filtered[COL_JOB_KEY] == job_key]
 
-start = pd.to_datetime(filters["start_date"])
-end = pd.to_datetime(filters["end_date"])
-job_lifetime = df_job[df_job[COL_MONTH_KEY].notna()][COL_MONTH_KEY]
-if job_lifetime.empty:
-    job_start = filters["lifetime_start"]
-    job_end = filters["lifetime_end"]
-else:
-    job_start = job_lifetime.min().date()
-    job_end = job_lifetime.max().date()
-is_lifetime = (filters["start_date"] == job_start) and (filters["end_date"] == job_end)
+fy_labels = filters.get("fy_labels", [])
+available_fys = (
+    df_job["FY_Label"].dropna().astype(str).unique().tolist()
+    if "FY_Label" in df_job.columns
+    else []
+)
+is_lifetime = set(fy_labels) == set(available_fys)
 
 actuals_window = df_job[
-    df_job[COL_MONTH_KEY].notna()
-    & (df_job[COL_MONTH_KEY] >= start)
-    & (df_job[COL_MONTH_KEY] <= end)
+    df_job[COL_MONTH_KEY].notna() & df_job["FY_Label"].isin(fy_labels)
 ]
 if actuals_window.empty:
     st.warning(
@@ -107,17 +102,13 @@ if actuals_window.empty:
     )
 task_month = actuals_window[actuals_window[COL_TASK_KEY] != "__UNALLOCATED__"].copy()
 unallocated = actuals_window[actuals_window[COL_TASK_KEY] == "__UNALLOCATED__"].copy()
-task_month = add_task_month_metrics(task_month)
 
 task_month_lifetime = df_job[
     df_job[COL_MONTH_KEY].notna() & (df_job[COL_TASK_KEY] != "__UNALLOCATED__")
 ].copy()
-task_month_lifetime = add_task_month_metrics(task_month_lifetime)
 
 dim_job_month = build_dim_job_month(df_job[df_job[COL_MONTH_KEY].notna()])
-dim_job_month_window = dim_job_month[
-    (dim_job_month[COL_MONTH_KEY] >= start) & (dim_job_month[COL_MONTH_KEY] <= end)
-]
+dim_job_month_window = dim_job_month[dim_job_month["FY_Label"].isin(fy_labels)]
 dim_job_task_quote = build_dim_job_task_quote(df_job)
 
 task_label_col = next(
@@ -146,16 +137,10 @@ selected_tasks = st.multiselect(
 if not selected_tasks:
     st.stop()
 
-quote_mode = "Lifetime Quote"
-if not is_lifetime:
+quote_mode = filters.get("quote_mode", "Earned Quote Proxy")
+if not is_lifetime and quote_mode == "Lifetime Quote":
     st.warning(
-        "You're viewing period actuals against lifetime quote. Choose quote alignment."
-    )
-    quote_mode = st.radio(
-        "Quote Mode",
-        options=["Lifetime Quote", "Earned Quote Proxy"],
-        horizontal=True,
-        key="quote_mode",
+        "You're viewing period actuals against lifetime quote. Consider Earned Quote Proxy."
     )
 
 quote_by_task = compute_quote_by_task(

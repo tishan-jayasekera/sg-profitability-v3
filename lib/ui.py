@@ -44,6 +44,15 @@ def preset_range(preset: str, lifetime_start: date, lifetime_end: date) -> tuple
     return lifetime_start, lifetime_end
 
 
+def _sort_fy_labels(labels: list[str]) -> list[str]:
+    def _fy_key(label: str) -> int:
+        if not label:
+            return 0
+        return int(label.replace("FY", ""))
+
+    return sorted(labels, key=_fy_key)
+
+
 def job_label_map(df: pd.DataFrame) -> dict[str, str]:
     return _job_label_map(df)
 
@@ -75,27 +84,59 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         lifetime_start = lifetime.min().date()
         lifetime_end = lifetime.max().date()
 
+    fy_labels = []
+    if "FY_Label" in df.columns:
+        fy_labels = _sort_fy_labels(
+            df["FY_Label"].dropna().astype(str).unique().tolist()
+        )
+    if not fy_labels:
+        fy_labels = ["FY0"]
+
+    current_fy = fy_labels[-1]
+    last_3_fys = fy_labels[-3:] if len(fy_labels) >= 3 else fy_labels
+
     if "applied_filters" not in st.session_state:
         st.session_state["applied_filters"] = {}
-        st.session_state["applied_date_preset"] = "Lifetime"
-        st.session_state["applied_date_range"] = (lifetime_start, lifetime_end)
+        st.session_state["applied_fy_preset"] = "Last 3 FYs"
+        st.session_state["applied_fy_labels"] = last_3_fys
+        st.session_state["applied_trend_grain"] = "FY"
+        st.session_state["applied_scope_level"] = "Company"
         st.session_state["applied_include_unallocated"] = True
         st.session_state["applied_include_quote_only"] = True
+        st.session_state["applied_quote_mode"] = "Earned Quote Proxy"
 
     with st.sidebar.form("filters_form"):
-        preset = st.selectbox(
-            "Date Preset",
-            options=["Lifetime", "FY", "YTD", "Last 12m", "Custom"],
-            index=["Lifetime", "FY", "YTD", "Last 12m", "Custom"].index(
-                st.session_state.get("applied_date_preset", "Lifetime")
+        scope_level = st.selectbox(
+            "Scope Level",
+            options=["Company", "Department", "Product", "Job"],
+            index=["Company", "Department", "Product", "Job"].index(
+                st.session_state.get("applied_scope_level", "Company")
             ),
-            key="date_preset_input",
+            key="scope_level_input",
         )
-        date_default = st.session_state.get("applied_date_range", (lifetime_start, lifetime_end))
-        date_range = st.date_input(
-            "Date Range (Month_Key)",
-            value=date_default,
-            key="date_range_input",
+        fy_preset = st.selectbox(
+            "FY Preset",
+            options=["Last 3 FYs", "FYTD", "All FYs", "Custom"],
+            index=["Last 3 FYs", "FYTD", "All FYs", "Custom"].index(
+                st.session_state.get("applied_fy_preset", "Last 3 FYs")
+            ),
+            key="fy_preset_input",
+        )
+        fy_selected = st.multiselect(
+            "Fiscal Years",
+            options=fy_labels,
+            default=st.session_state.get("applied_fy_labels", last_3_fys),
+            key="fy_labels_input",
+            disabled=fy_preset != "Custom",
+        )
+        trend_grain = st.radio(
+            "Trend Granularity",
+            options=["FY", "Month"],
+            index=["FY", "Month"].index(
+                st.session_state.get("applied_trend_grain", "FY")
+            ),
+            horizontal=True,
+            key="trend_grain_input",
         )
 
         include_unallocated = st.toggle(
@@ -107,6 +148,14 @@ def render_sidebar(df: pd.DataFrame) -> dict:
             "Include QUOTE_ONLY tasks in tables",
             value=st.session_state.get("applied_include_quote_only", True),
             key="include_quote_only_input",
+        )
+
+        quote_default = st.session_state.get("applied_quote_mode", "Earned Quote Proxy")
+        quote_mode = st.selectbox(
+            "Quote Alignment",
+            options=["Earned Quote Proxy", "Lifetime Quote"],
+            index=["Earned Quote Proxy", "Lifetime Quote"].index(quote_default),
+            key="quote_mode_input",
         )
 
         def _multiselect(label: str, column: str, key: str) -> list[str]:
@@ -133,22 +182,30 @@ def render_sidebar(df: pd.DataFrame) -> dict:
     if st.sidebar.button("Reset Filters"):
         _reset_filters()
         st.session_state["applied_filters"] = {}
-        st.session_state["applied_date_preset"] = "Lifetime"
-        st.session_state["applied_date_range"] = (lifetime_start, lifetime_end)
+        st.session_state["applied_fy_preset"] = "Last 3 FYs"
+        st.session_state["applied_fy_labels"] = last_3_fys
+        st.session_state["applied_trend_grain"] = "FY"
+        st.session_state["applied_scope_level"] = "Company"
         st.session_state["applied_include_unallocated"] = True
         st.session_state["applied_include_quote_only"] = True
+        st.session_state["applied_quote_mode"] = "Earned Quote Proxy"
+    st.sidebar.caption("Changes apply when you click Apply Filters.")
 
     if applied:
-        st.session_state["applied_date_preset"] = preset
-        if preset == "Custom":
-            if isinstance(date_range, tuple) and len(date_range) == 2:
-                st.session_state["applied_date_range"] = date_range
+        st.session_state["applied_scope_level"] = scope_level
+        st.session_state["applied_fy_preset"] = fy_preset
+        if fy_preset == "Custom":
+            st.session_state["applied_fy_labels"] = fy_selected or last_3_fys
+        elif fy_preset == "FYTD":
+            st.session_state["applied_fy_labels"] = [current_fy]
+        elif fy_preset == "All FYs":
+            st.session_state["applied_fy_labels"] = fy_labels
         else:
-            st.session_state["applied_date_range"] = preset_range(
-                preset, lifetime_start, lifetime_end
-            )
+            st.session_state["applied_fy_labels"] = last_3_fys
+        st.session_state["applied_trend_grain"] = trend_grain
         st.session_state["applied_include_unallocated"] = include_unallocated
         st.session_state["applied_include_quote_only"] = include_quote_only
+        st.session_state["applied_quote_mode"] = quote_mode
         st.session_state["applied_filters"] = {
             "department": selected_department,
             "function": selected_function,
@@ -161,13 +218,21 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         }
 
     applied_filters = st.session_state.get("applied_filters", {})
-    start_date, end_date = st.session_state.get(
-        "applied_date_range", (lifetime_start, lifetime_end)
-    )
+    fy_selection = st.session_state.get("applied_fy_labels", last_3_fys)
+    start_date, end_date = lifetime_start, lifetime_end
+    if "FY_Label" in df.columns and fy_selection:
+        fy_df = df[df["FY_Label"].isin(fy_selection) & df[COL_MONTH_KEY].notna()]
+        if not fy_df.empty:
+            start_date = fy_df[COL_MONTH_KEY].min().date()
+            end_date = fy_df[COL_MONTH_KEY].max().date()
 
     filters = {
         "start_date": start_date,
         "end_date": end_date,
+        "fy_labels": fy_selection,
+        "trend_grain": st.session_state.get("applied_trend_grain", "FY"),
+        "scope_level": st.session_state.get("applied_scope_level", "Company"),
+        "quote_mode": st.session_state.get("applied_quote_mode", "Earned Quote Proxy"),
         "include_unallocated": st.session_state.get("applied_include_unallocated", True),
         "include_quote_only": st.session_state.get("applied_include_quote_only", True),
         "lifetime_start": lifetime_start,

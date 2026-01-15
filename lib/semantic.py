@@ -14,6 +14,7 @@ from lib.constants import (
     ROW_TASK_MONTH,
     ROW_UNALLOCATED,
 )
+from lib.metrics import add_fiscal_fields
 
 
 TASK_DIM_COLUMNS = [
@@ -73,6 +74,7 @@ def build_dim_job_month(df: pd.DataFrame) -> pd.DataFrame:
         .agg(agg)
         .sort_values([COL_JOB_KEY, COL_MONTH_KEY])
     )
+    dim = add_fiscal_fields(dim)
     return dim
 
 
