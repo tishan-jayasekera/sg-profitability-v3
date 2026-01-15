@@ -30,7 +30,7 @@ def _job_label_map(df: pd.DataFrame) -> dict[str, str]:
     return {row[COL_JOB_KEY]: f"{row[COL_JOB_KEY]} | {row[label]}" for _, row in job_map.iterrows()}
 
 
-def _preset_range(preset: str, lifetime_start: date, lifetime_end: date) -> tuple[date, date]:
+def preset_range(preset: str, lifetime_start: date, lifetime_end: date) -> tuple[date, date]:
     if preset == "Lifetime":
         return lifetime_start, lifetime_end
     if preset == "Last 12m":
@@ -43,6 +43,9 @@ def _preset_range(preset: str, lifetime_start: date, lifetime_end: date) -> tupl
         return date(fy_start_year, 7, 1), lifetime_end
     return lifetime_start, lifetime_end
 
+
+def job_label_map(df: pd.DataFrame) -> dict[str, str]:
+    return _job_label_map(df)
 
 FILTER_KEYS = [
     "department",
@@ -64,40 +67,7 @@ def _reset_filters() -> None:
 def render_sidebar(df: pd.DataFrame) -> dict:
     st.sidebar.header("Filters")
 
-    job_map = _job_label_map(df)
-    job_keys = sorted(job_map.keys())
-    if not job_keys:
-        st.error("No Job_Key values found.")
-        st.stop()
-
-    def _compute_lifetime(job_key_value: str) -> tuple[date, date]:
-        job_df_local = df[df[COL_JOB_KEY] == job_key_value]
-        lifetime_series = job_df_local[job_df_local[COL_MONTH_KEY].notna()][COL_MONTH_KEY]
-        if lifetime_series.empty:
-            today = date.today()
-            return today, today
-        return lifetime_series.min().date(), lifetime_series.max().date()
-
-    def _on_job_change() -> None:
-        job_key_value = st.session_state.get("job_key")
-        if job_key_value is None:
-            return
-        _reset_filters()
-        lifetime_start, lifetime_end = _compute_lifetime(job_key_value)
-        st.session_state["date_preset"] = "Lifetime"
-        st.session_state["date_range"] = (lifetime_start, lifetime_end)
-        st.session_state["job_key_prev"] = job_key_value
-
-    job_key = st.sidebar.selectbox(
-        "Job",
-        options=job_keys,
-        format_func=lambda k: job_map.get(k, k),
-        key="job_key",
-        on_change=_on_job_change,
-    )
-
-    job_df = df[df[COL_JOB_KEY] == job_key]
-    lifetime = job_df[job_df[COL_MONTH_KEY].notna()][COL_MONTH_KEY]
+    lifetime = df[df[COL_MONTH_KEY].notna()][COL_MONTH_KEY]
     if lifetime.empty:
         lifetime_start = date.today()
         lifetime_end = date.today()
@@ -109,7 +79,7 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         preset_value = st.session_state.get("date_preset", "Lifetime")
         if preset_value == "Custom":
             return
-        start, end = _preset_range(preset_value, lifetime_start, lifetime_end)
+        start, end = preset_range(preset_value, lifetime_start, lifetime_end)
         st.session_state["date_range"] = (start, end)
 
     preset = st.sidebar.selectbox(
@@ -124,7 +94,7 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         date_default = st.session_state["date_range"]
     else:
         date_default = (
-            _preset_range(preset, lifetime_start, lifetime_end)
+            preset_range(preset, lifetime_start, lifetime_end)
             if preset != "Custom"
             else (lifetime_start, lifetime_end)
         )
@@ -150,61 +120,61 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         key="include_quote_only",
     )
 
-    filters = {"job_key": job_key, "start_date": start_date, "end_date": end_date}
+    filters = {"start_date": start_date, "end_date": end_date}
 
-    if "Department_Eff" in job_df.columns:
+    if "Department_Eff" in df.columns:
         filters["department"] = st.sidebar.multiselect(
             "Department",
-            options=_sorted_unique(job_df["Department_Eff"]),
+            options=_sorted_unique(df["Department_Eff"]),
             default=st.session_state.get("department", []),
             key="department",
         )
-    if "Function" in job_df.columns:
+    if "Function" in df.columns:
         filters["function"] = st.sidebar.multiselect(
             "Function",
-            options=_sorted_unique(job_df["Function"]),
+            options=_sorted_unique(df["Function"]),
             default=st.session_state.get("function", []),
             key="function",
         )
-    if "Business Unit" in job_df.columns:
+    if "Business Unit" in df.columns:
         filters["business_unit"] = st.sidebar.multiselect(
             "Business Unit",
-            options=_sorted_unique(job_df["Business Unit"]),
+            options=_sorted_unique(df["Business Unit"]),
             default=st.session_state.get("business_unit", []),
             key="business_unit",
         )
-    if "Billable?" in job_df.columns:
+    if "Billable?" in df.columns:
         filters["billable"] = st.sidebar.multiselect(
             "Billable?",
-            options=_sorted_unique(job_df["Billable?"]),
+            options=_sorted_unique(df["Billable?"]),
             default=st.session_state.get("billable", []),
             key="billable",
         )
-    if "Deliverable" in job_df.columns:
+    if "Deliverable" in df.columns:
         filters["deliverable"] = st.sidebar.multiselect(
             "Deliverable",
-            options=_sorted_unique(job_df["Deliverable"]),
+            options=_sorted_unique(df["Deliverable"]),
             default=st.session_state.get("deliverable", []),
             key="deliverable",
         )
-    if "Role" in job_df.columns:
+    if "Role" in df.columns:
         filters["role"] = st.sidebar.multiselect(
             "Role",
-            options=_sorted_unique(job_df["Role"]),
+            options=_sorted_unique(df["Role"]),
             default=st.session_state.get("role", []),
             key="role",
         )
-    if "Task" in job_df.columns:
+    if "Task" in df.columns:
         filters["task"] = st.sidebar.multiselect(
             "Task",
-            options=_sorted_unique(job_df["Task"]),
+            options=_sorted_unique(df["Task"]),
             default=st.session_state.get("task", []),
             key="task",
         )
-    if "Source" in job_df.columns:
+    if "Source" in df.columns:
         filters["source"] = st.sidebar.multiselect(
             "Revenue Source",
-            options=_sorted_unique(job_df["Source"]),
+            options=_sorted_unique(df["Source"]),
             default=st.session_state.get("source", []),
             key="source",
         )

@@ -20,7 +20,7 @@ from lib.data_loader import load_data
 from lib.metrics import add_task_month_metrics, compute_quote_by_task, safe_divide
 from lib.qa import render_data_integrity
 from lib.semantic import add_row_type, build_dim_job_month, build_dim_job_task_quote
-from lib.ui import apply_filters, render_sidebar
+from lib.ui import apply_filters, job_label_map, render_sidebar
 
 
 def _fmt_currency(value):
@@ -58,16 +58,31 @@ st.caption("Decompose margin erosion into discounting, delivery overrun, and rev
 
 df = add_row_type(load_data())
 filters = render_sidebar(df)
+df_filtered = apply_filters(df, filters)
 
-job_key = filters["job_key"]
-df_job = df[df[COL_JOB_KEY] == job_key]
-df_job = apply_filters(df_job, filters)
+job_map = job_label_map(df_filtered)
+job_keys = sorted(job_map.keys())
+if not job_keys:
+    st.info("No jobs available with the current filters.")
+    st.stop()
+
+job_key = st.selectbox(
+    "Job",
+    options=job_keys,
+    format_func=lambda k: job_map.get(k, k),
+)
+df_job = df_filtered[df_filtered[COL_JOB_KEY] == job_key]
 
 start = pd.to_datetime(filters["start_date"])
 end = pd.to_datetime(filters["end_date"])
-is_lifetime = (filters["start_date"] == filters["lifetime_start"]) and (
-    filters["end_date"] == filters["lifetime_end"]
-)
+job_lifetime = df_job[df_job[COL_MONTH_KEY].notna()][COL_MONTH_KEY]
+if job_lifetime.empty:
+    job_start = filters["lifetime_start"]
+    job_end = filters["lifetime_end"]
+else:
+    job_start = job_lifetime.min().date()
+    job_end = job_lifetime.max().date()
+is_lifetime = (filters["start_date"] == job_start) and (filters["end_date"] == job_end)
 
 actuals_window = df_job[
     df_job[COL_MONTH_KEY].notna()
