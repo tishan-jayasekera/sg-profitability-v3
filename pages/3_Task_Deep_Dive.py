@@ -18,7 +18,7 @@ from lib.data_loader import load_data
 from lib.metrics import add_task_month_metrics, compute_quote_by_task, safe_divide
 from lib.qa import render_data_integrity
 from lib.semantic import add_row_type, build_dim_job_month, build_dim_job_task_quote
-from lib.ui import apply_filters, job_label_map, render_sidebar
+from lib.ui import apply_filters, render_sidebar
 
 
 def _fmt_currency(value):
@@ -39,6 +39,23 @@ def _fmt_hours(value):
     return f"{value:,.1f}h"
 
 
+def _job_label_map(df: pd.DataFrame) -> dict[str, str]:
+    label = None
+    for candidate in ["[Job] Name", "[Job] Job No.", "Job Number"]:
+        if candidate in df.columns:
+            label = candidate
+            break
+    if label is None:
+        return {k: k for k in df[COL_JOB_KEY].dropna().astype(str).unique()}
+    job_map = (
+        df[[COL_JOB_KEY, label]]
+        .dropna()
+        .drop_duplicates()
+        .astype({COL_JOB_KEY: str, label: str})
+    )
+    return {row[COL_JOB_KEY]: f"{row[COL_JOB_KEY]} | {row[label]}" for _, row in job_map.iterrows()}
+
+
 st.set_page_config(page_title="Task Deep Dive", layout="wide")
 st.title("Task Deep Dive")
 st.caption("Investigate task profitability, rate evolution, and diagnostics.")
@@ -47,7 +64,7 @@ df = add_row_type(load_data())
 filters = render_sidebar(df)
 df_filtered = apply_filters(df, filters)
 
-job_map = job_label_map(df_filtered)
+job_map = _job_label_map(df_filtered)
 job_keys = sorted(job_map.keys())
 if not job_keys:
     st.info("No jobs available with the current filters.")

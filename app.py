@@ -22,7 +22,7 @@ from lib.metrics import (
 )
 from lib.qa import render_data_integrity
 from lib.semantic import add_row_type, build_dim_job_month, build_dim_job_task_quote
-from lib.ui import apply_filters, job_label_map, render_sidebar
+from lib.ui import apply_filters, render_sidebar
 
 
 def _fmt_currency(value):
@@ -47,6 +47,23 @@ def _fmt_pct(value):
     if value is None or pd.isna(value):
         return "N/A"
     return f"{value:.1%}"
+
+
+def _job_label_map(df: pd.DataFrame) -> dict[str, str]:
+    label = None
+    for candidate in ["[Job] Name", "[Job] Job No.", "Job Number"]:
+        if candidate in df.columns:
+            label = candidate
+            break
+    if label is None:
+        return {k: k for k in df[COL_JOB_KEY].dropna().astype(str).unique()}
+    job_map = (
+        df[[COL_JOB_KEY, label]]
+        .dropna()
+        .drop_duplicates()
+        .astype({COL_JOB_KEY: str, label: str})
+    )
+    return {row[COL_JOB_KEY]: f"{row[COL_JOB_KEY]} | {row[label]}" for _, row in job_map.iterrows()}
 
 
 def _add_fiscal_year(df: pd.DataFrame) -> pd.DataFrame:
@@ -253,7 +270,7 @@ job_summary["Quoted_Rate"] = safe_divide(
 )
 job_summary = job_summary.sort_values("Actual_Revenue", ascending=False)
 
-job_map = job_label_map(df_filtered)
+job_map = _job_label_map(df_filtered)
 if job_summary.empty:
     st.info("No job actuals in the selected window.")
 else:
