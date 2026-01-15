@@ -15,40 +15,25 @@ from lib.constants import (
 )
 from lib.data_loader import load_data_enriched
 from lib.metrics import (
+    add_earned_quote_task_month,
+    build_job_task_rates,
     build_task_summary,
-    compute_monthly_metrics,
-    compute_quote_by_task,
     safe_divide,
 )
 from lib.qa import render_data_integrity
 from lib.semantic import build_dim_job_month, build_dim_job_task_quote
 from lib.ui import apply_filters, render_sidebar
 
-
-def _fmt_currency(value):
-    if value is None or pd.isna(value):
-        return "N/A"
-    return f"${value:,.0f}"
-
-
-def _fmt_rate(value):
-    if value is None or pd.isna(value):
-        return "N/A"
-    return f"${value:,.2f}/hr"
+MARGIN_TARGET = 0.35
+MARGIN_WATCH = 0.2
+QUOTE_GAP_WATCH = 0.05
+QUOTE_GAP_RISK = 0.1
 
 
-def _fmt_hours(value):
-    if value is None or pd.isna(value):
-        return "N/A"
-    return f"{value:,.1f}h"
+st.set_page_config(page_title="Profitability Cockpit", layout="wide")
 
 
-def _fmt_pct(value):
-    if value is None or pd.isna(value):
-        return "N/A"
-    return f"{value:.1%}"
-
-
+@st.cache_data(show_spinner=False)
 def _job_label_map(df: pd.DataFrame) -> dict[str, str]:
     label = None
     for candidate in ["[Job] Name", "[Job] Job No.", "Job Number"]:
@@ -66,362 +51,663 @@ def _job_label_map(df: pd.DataFrame) -> dict[str, str]:
     return {row[COL_JOB_KEY]: f"{row[COL_JOB_KEY]} | {row[label]}" for _, row in job_map.iterrows()}
 
 
-def _add_fiscal_year(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    fy_year = out[COL_MONTH_KEY].dt.year + (out[COL_MONTH_KEY].dt.month >= 7).astype(int)
-    out["Fiscal_Year"] = "FY" + fy_year.astype(str)
-    return out
+def _fmt_currency(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    abs_value = abs(value)
+    if abs_value >= 1_000_000:
+        return f"${value/1_000_000:,.1f}M"
+    if abs_value >= 1_000:
+        return f"${value/1_000:,.1f}K"
+    return f"${value:,.0f}"
 
 
-def _group_summary(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    summary = (
-        df.groupby(group_col, as_index=False)
+def _fmt_rate(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"${value:,.0f}/hr"
+
+
+def _fmt_hours(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{value:,.0f}h"
+
+
+def _fmt_pct(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{value:.1%}"
+
+
+def _status_margin(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    if value >= MARGIN_TARGET:
+        return "Good"
+    if value >= MARGIN_WATCH:
+        return "Watch"
+    return "Risk"
+
+
+def _status_quote_gap(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    if value >= QUOTE_GAP_RISK:
+        return "Risk"
+    if value >= QUOTE_GAP_WATCH:
+        return "Watch"
+    return "Good"
+
+
+def _render_hero(title: str, model: str, pills: list[str]) -> None:
+    pills_html = "".join(
+        [
+            f"<span class='pill'>{pill}</span>"
+            for pill in pills
+        ]
+    )
+    st.markdown(
+        f"""
+        <div class="hero">
+            <div class="hero-title">{title}</div>
+            <div class="hero-model">{model}</div>
+            <div class="hero-pills">{pills_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_callout(text: str) -> None:
+    st.info(text)
+
+
+def _resolve_product_key(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    for col in ["Product", "Deliverable", "Business Unit", "Function"]:
+        if col in df.columns:
+            df = df.copy()
+            df["Product_Key"] = df[col].fillna("Unspecified")
+            return df, col
+    df = df.copy()
+    df["Product_Key"] = "Unspecified"
+    return df, "Unspecified"
+
+
+def _group_metrics(
+    task_month: pd.DataFrame,
+    earned_task_month: pd.DataFrame,
+    group_col: str,
+) -> pd.DataFrame:
+    actual = (
+        task_month.groupby(group_col, as_index=False)
         .agg(
-            Actual_Revenue=(COL_ALLOCATED_REVENUE, "sum"),
             Actual_Cost=(COL_COST, "sum"),
             Actual_Hours=(COL_HOURS, "sum"),
+            Job_Count=(COL_JOB_KEY, "nunique"),
         )
-        .sort_values("Actual_Revenue", ascending=False)
     )
-    summary["Actual_Profit"] = summary["Actual_Revenue"] - summary["Actual_Cost"]
-    summary["Actual_Margin"] = safe_divide(summary["Actual_Profit"], summary["Actual_Revenue"])
-    summary["Realized_Rate"] = safe_divide(summary["Actual_Revenue"], summary["Actual_Hours"])
-    summary["Base_Cost_Rate"] = safe_divide(summary["Actual_Cost"], summary["Actual_Hours"])
+    earned = (
+        earned_task_month.groupby(group_col, as_index=False)
+        .agg(
+            Quoted_Revenue=("Earned_Quoted_Amount", "sum"),
+            Quoted_Hours=("Earned_Quoted_Hours", "sum"),
+            Benchmark_Revenue=("Benchmark_Revenue", "sum"),
+            Planned_Cost=("Planned_Cost", "sum"),
+        )
+    )
+    summary = actual.merge(earned, on=group_col, how="outer")
+    summary["Quoted_Revenue"] = summary["Quoted_Revenue"].fillna(0)
+    summary["Actual_Cost"] = summary["Actual_Cost"].fillna(0)
+    summary["Actual_Hours"] = summary["Actual_Hours"].fillna(0)
+    summary["Benchmark_Revenue"] = summary["Benchmark_Revenue"].fillna(0)
+    summary["Planned_Cost"] = summary["Planned_Cost"].fillna(0)
+
+    summary["Profit"] = summary["Quoted_Revenue"] - summary["Actual_Cost"]
+    summary["Margin"] = safe_divide(summary["Profit"], summary["Quoted_Revenue"])
+    summary["Quote_Gap"] = summary["Benchmark_Revenue"] - summary["Quoted_Revenue"]
+    summary["Quote_Gap_Pct"] = safe_divide(
+        summary["Quote_Gap"], summary["Benchmark_Revenue"]
+    )
+    summary["Overrun"] = summary["Actual_Cost"] - summary["Planned_Cost"]
+    summary["Effective_Rate"] = safe_divide(
+        summary["Quoted_Revenue"], summary["Actual_Hours"]
+    )
+    summary["Cost_Rate"] = safe_divide(
+        summary["Actual_Cost"], summary["Actual_Hours"]
+    )
+    summary["Margin_Status"] = summary["Margin"].apply(_status_margin)
+    summary["Quote_Status"] = summary["Quote_Gap_Pct"].apply(_status_quote_gap)
     return summary
 
 
-st.set_page_config(page_title="Executive Overview", layout="wide")
-st.title("Executive Overview")
-st.caption("Top-down view: company -> department -> product -> job -> task.")
+st.markdown(
+    """
+    <style>
+    .hero {padding: 18px 22px; background: linear-gradient(135deg, #0f1f2b 0%, #1a394a 100%); border-radius: 14px; margin-bottom: 18px;}
+    .hero-title {font-family: 'Sora', sans-serif; font-size: 28px; color: #f7fbff; font-weight: 700;}
+    .hero-model {font-family: 'Sora', sans-serif; font-size: 14px; color: #c6d7e1; margin-top: 6px;}
+    .hero-pills {margin-top: 10px;}
+    .pill {display: inline-block; padding: 4px 10px; border-radius: 999px; background: #2b586e; color: #eaf3f8; font-size: 12px; margin-right: 6px;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-df = load_data_enriched()
-filters = render_sidebar(df)
-scope_level = filters.get("scope_level", "Company")
-scope_order = ["Company", "Department", "Product", "Job", "Task"]
-max_scope_index = scope_order.index(scope_level) if scope_level in scope_order else 0
-df_filtered = apply_filters(df, filters)
-if df_filtered.empty:
+
+_render_hero(
+    "Profitability Cockpit",
+    "Revenue (Quoted) - Benchmark (Quoted x Standard Rate) - Cost (Actual)",
+    ["Pricing Discipline", "Scope Control", "Margin Health", "Delivery Efficiency"],
+)
+
+st.caption("Company to task, executive-first, FY anchored.")
+
+with st.expander("Understanding this dashboard"):
+    st.write(
+        "Revenue = Quoted Amount. Benchmark = Quoted Hours x Standard Billable Rate. "
+        "Cost = Actual Hours x Cost Rate. Margin = Revenue - Cost. "
+        "Pricing failure = underquoting vs benchmark. Delivery failure = cost overrun vs plan."
+    )
+
+with st.expander("Metric definitions"):
+    st.write(
+        "Quoted revenue is deduped at Job x Task. Benchmarks and costs are aggregated from "
+        "task-months using weighted rates. All ratios are computed from sums, never from averages."
+    )
+
+
+# Load and filter data
+raw = load_data_enriched()
+filters = render_sidebar(raw)
+filtered = apply_filters(raw, filters)
+if filtered.empty:
     st.error("Current filters exclude all data. Use Reset Filters in the sidebar.")
     st.stop()
 
+filtered, product_source = _resolve_product_key(filtered)
+
 filters_version = st.session_state.get("filters_version", 0)
-cache = st.session_state.get("exec_cache")
-cache_version = st.session_state.get("exec_cache_version")
+cache = st.session_state.get("portfolio_cache")
+cache_version = st.session_state.get("portfolio_cache_version")
+
 if cache and cache_version == filters_version:
-    fy_labels_effective = cache["fy_labels_effective"]
-    is_lifetime = cache["is_lifetime"]
-    actuals_window = cache["actuals_window"]
-    task_month = cache["task_month"]
-    unallocated = cache["unallocated"]
-    task_month_lifetime = cache["task_month_lifetime"]
-    dim_job_month = cache["dim_job_month"]
-    dim_job_month_window = cache["dim_job_month_window"]
-    dim_job_task_quote = cache["dim_job_task_quote"]
-    quote_by_task = cache["quote_by_task"]
-    actuals_empty = cache["actuals_empty"]
-    fallback_all_fy = cache["fallback_all_fy"]
+    data = cache
 else:
     fy_labels = filters.get("fy_labels", [])
-    available_fys = (
-        df_filtered["FY_Label"].dropna().astype(str).unique().tolist()
-        if "FY_Label" in df_filtered.columns
-        else []
-    )
-    is_lifetime = set(fy_labels) == set(available_fys)
-
-    actuals_window = df_filtered[
-        df_filtered[COL_MONTH_KEY].notna()
-        & df_filtered["FY_Label"].isin(fy_labels)
+    actuals_window = filtered[
+        filtered[COL_MONTH_KEY].notna() & filtered["FY_Label"].isin(fy_labels)
     ]
     fy_labels_effective = fy_labels
     fallback_all_fy = False
     if actuals_window.empty:
-        actuals_all = df_filtered[df_filtered[COL_MONTH_KEY].notna()]
+        actuals_all = filtered[filtered[COL_MONTH_KEY].notna()]
         if not actuals_all.empty:
             fallback_all_fy = True
             actuals_window = actuals_all
             fy_labels_effective = (
                 actuals_all["FY_Label"].dropna().astype(str).unique().tolist()
             )
-            is_lifetime = True
-    actuals_empty = actuals_window.empty
-
     task_month = actuals_window[actuals_window[COL_TASK_KEY] != "__UNALLOCATED__"].copy()
     unallocated = actuals_window[actuals_window[COL_TASK_KEY] == "__UNALLOCATED__"].copy()
 
-    task_month_lifetime = df_filtered[
-        df_filtered[COL_MONTH_KEY].notna() & (df_filtered[COL_TASK_KEY] != "__UNALLOCATED__")
+    task_month_lifetime = filtered[
+        filtered[COL_MONTH_KEY].notna() & (filtered[COL_TASK_KEY] != "__UNALLOCATED__")
     ].copy()
 
-    dim_job_month = build_dim_job_month(df_filtered[df_filtered[COL_MONTH_KEY].notna()])
+    dim_job_month = build_dim_job_month(filtered[filtered[COL_MONTH_KEY].notna()])
     dim_job_month_window = dim_job_month[dim_job_month["FY_Label"].isin(fy_labels_effective)]
-    dim_job_task_quote = build_dim_job_task_quote(df_filtered)
+    dim_job_task_quote = build_dim_job_task_quote(filtered)
 
-    quote_by_task = compute_quote_by_task(
-        filters.get("quote_mode", "Earned Quote Proxy"),
-        task_month,
-        task_month_lifetime,
-        dim_job_task_quote,
+    job_task_rates = build_job_task_rates(task_month_lifetime, dim_job_task_quote)
+    earned_task_month = add_earned_quote_task_month(
+        task_month, task_month_lifetime, dim_job_task_quote, job_task_rates
     )
 
-    st.session_state["exec_cache"] = {
+    data = {
         "fy_labels_effective": fy_labels_effective,
-        "is_lifetime": is_lifetime,
-        "actuals_window": actuals_window,
+        "fallback_all_fy": fallback_all_fy,
         "task_month": task_month,
         "unallocated": unallocated,
         "task_month_lifetime": task_month_lifetime,
-        "dim_job_month": dim_job_month,
         "dim_job_month_window": dim_job_month_window,
         "dim_job_task_quote": dim_job_task_quote,
-        "quote_by_task": quote_by_task,
-        "actuals_empty": actuals_empty,
-        "fallback_all_fy": fallback_all_fy,
+        "job_task_rates": job_task_rates,
+        "earned_task_month": earned_task_month,
     }
-    st.session_state["exec_cache_version"] = filters_version
+    st.session_state["portfolio_cache"] = data
+    st.session_state["portfolio_cache_version"] = filters_version
 
-if fallback_all_fy:
+fy_labels_effective = data["fy_labels_effective"]
+if data["fallback_all_fy"]:
     st.warning(
         "No actuals for the selected FYs; showing all available FYs instead. "
         f"Available FYs: {', '.join(sorted(set(fy_labels_effective)))}"
     )
-st.caption(
-    "Scope: "
-    f"{scope_level} | FYs: {', '.join(fy_labels_effective)} | "
-    f"Quote: {filters.get('quote_mode', 'Earned Quote Proxy')}"
-)
-st.caption(
-    f"Filtered rows: {len(df_filtered):,} | Actuals in window: {len(actuals_window):,}"
-)
-if actuals_empty:
-    st.warning(
-        "No actuals in the selected window. Showing quote-only data where available. "
-        "Try All FYs for a full view."
-    )
 
+st.caption(
+    "Scope: Company | "
+    f"FYs: {', '.join(fy_labels_effective)} | "
+    f"Quote mode: {filters.get('quote_mode', 'Earned Quote Proxy')} | "
+    f"Product key: {product_source}"
+)
+
+if data["task_month"].empty:
+    st.warning("No actuals in the selected window. Try All FYs.")
+
+# Compute portfolio KPIs
 quote_mode = filters.get("quote_mode", "Earned Quote Proxy")
-if not is_lifetime and quote_mode == "Lifetime Quote":
-    st.warning(
-        "You're viewing period actuals against lifetime quote. Consider Earned Quote Proxy."
-    )
-
-recognized_revenue = dim_job_month_window[COL_AMOUNT].sum(min_count=1)
-allocated_revenue = task_month[COL_ALLOCATED_REVENUE].sum()
-if filters["include_unallocated"]:
-    allocated_revenue += unallocated[COL_ALLOCATED_REVENUE].sum()
-actual_cost = task_month[COL_COST].sum()
-actual_hours = task_month[COL_HOURS].sum()
-actual_profit = allocated_revenue - actual_cost
-actual_margin = safe_divide(actual_profit, allocated_revenue)
-
-quoted_amount = quote_by_task["Quoted_Amount_Mode"].sum(min_count=1)
-quoted_hours = quote_by_task["Quoted_Time_Mode"].sum(min_count=1)
-quoted_rate = safe_divide(quoted_amount, quoted_hours)
-
-st.subheader("Company Overview")
-row1 = st.columns(4)
-row1[0].metric("Recognized Revenue", _fmt_currency(recognized_revenue))
-row1[1].metric("Allocated Revenue", _fmt_currency(allocated_revenue))
-row1[2].metric("Actual Cost", _fmt_currency(actual_cost))
-row1[3].metric("Actual Profit", _fmt_currency(actual_profit))
-
-row2 = st.columns(4)
-row2[0].metric("Actual Hours", _fmt_hours(actual_hours))
-row2[1].metric("Realized Rate", _fmt_rate(safe_divide(allocated_revenue, actual_hours)))
-row2[2].metric("Base Cost Rate", _fmt_rate(safe_divide(actual_cost, actual_hours)))
-row2[3].metric("Quoted Rate", _fmt_rate(quoted_rate))
-
-st.subheader("Trend")
-monthly = compute_monthly_metrics(task_month, unallocated, filters["include_unallocated"])
-if monthly.empty:
-    st.info("No actuals to chart for this window.")
-else:
-    monthly = _add_fiscal_year(monthly)
-    monthly["Revenue_Total"] = monthly["Revenue"] + monthly["Unallocated_Revenue"]
-    if filters["trend_grain"] == "FY":
-        trend = (
-            monthly.groupby("Fiscal_Year", as_index=False)
-            .agg(
-                Revenue=("Revenue_Total", "sum"),
-                Cost=("Cost", "sum"),
-                Hours=("Hours", "sum"),
-            )
-            .sort_values("Fiscal_Year")
-        )
-        x_field = "Fiscal_Year:N"
-    else:
-        trend = (
-            monthly.groupby(COL_MONTH_KEY, as_index=False)
-            .agg(
-                Revenue=("Revenue_Total", "sum"),
-                Cost=("Cost", "sum"),
-                Hours=("Hours", "sum"),
-            )
-            .sort_values(COL_MONTH_KEY)
-        )
-        x_field = f"{COL_MONTH_KEY}:T"
-
-    trend["Profit"] = trend["Revenue"] - trend["Cost"]
-    trend["Margin"] = safe_divide(trend["Profit"], trend["Revenue"])
-
-    trend_long = trend.melt(
-        id_vars=[trend.columns[0]],
-        value_vars=["Revenue", "Cost", "Profit"],
-        var_name="Metric",
-        value_name="Value",
-    )
-    trend_chart = (
-        alt.Chart(trend_long)
-        .mark_bar()
-        .encode(
-            x=alt.X(x_field, title="Period"),
-            y=alt.Y("Value:Q", title="Amount"),
-            color="Metric:N",
-            tooltip=[trend.columns[0], "Metric", "Value"],
-        )
-        .properties(height=280)
-    )
-    st.altair_chart(trend_chart, width="stretch")
-    st.dataframe(trend, width="stretch", height=220)
-
-if max_scope_index >= 1:
-    st.subheader("Department View")
-    if "Department_Eff" not in task_month.columns:
-        st.info("No Department data available.")
-    else:
-        dept_summary = _group_summary(task_month, "Department_Eff")
-        st.dataframe(dept_summary, width="stretch", height=300)
-        if filters["include_unallocated"] and not unallocated.empty:
-            st.caption("Unallocated revenue is excluded from department rollups.")
-
-if max_scope_index >= 2:
-    st.subheader("Product View")
-    if "Product" not in task_month.columns:
-        st.info("No Product data available.")
-    else:
-        product_summary = _group_summary(task_month, "Product")
-        st.dataframe(product_summary, width="stretch", height=300)
-        if filters["include_unallocated"] and not unallocated.empty:
-            st.caption("Unallocated revenue is excluded from product rollups.")
-
-if max_scope_index >= 3:
-    st.subheader("Job View")
-    job_summary = (
-        task_month.groupby(COL_JOB_KEY, as_index=False)
-        .agg(
-            Allocated_Revenue=(COL_ALLOCATED_REVENUE, "sum"),
-            Actual_Cost=(COL_COST, "sum"),
-            Actual_Hours=(COL_HOURS, "sum"),
-        )
-        .merge(
-            quote_by_task.groupby(COL_JOB_KEY, as_index=False)[
-                ["Quoted_Time_Mode", "Quoted_Amount_Mode"]
-            ].sum(min_count=1),
-            on=COL_JOB_KEY,
-            how="left",
-        )
-    )
-    unalloc_by_job = (
-        unallocated.groupby(COL_JOB_KEY, as_index=False)[COL_ALLOCATED_REVENUE]
-        .sum()
-        .rename(columns={COL_ALLOCATED_REVENUE: "Unallocated_Revenue"})
-    )
-    job_summary = job_summary.merge(unalloc_by_job, on=COL_JOB_KEY, how="left")
-    job_summary["Unallocated_Revenue"] = job_summary["Unallocated_Revenue"].fillna(0)
-    if filters["include_unallocated"]:
-        job_summary["Actual_Revenue"] = (
-            job_summary["Allocated_Revenue"] + job_summary["Unallocated_Revenue"]
-        )
-    else:
-        job_summary["Actual_Revenue"] = job_summary["Allocated_Revenue"]
-
-    job_summary["Actual_Profit"] = job_summary["Actual_Revenue"] - job_summary["Actual_Cost"]
-    job_summary["Actual_Margin"] = safe_divide(
-        job_summary["Actual_Profit"], job_summary["Actual_Revenue"]
-    )
-    job_summary["Realized_Rate"] = safe_divide(
-        job_summary["Actual_Revenue"], job_summary["Actual_Hours"]
-    )
-    job_summary["Quoted_Rate"] = safe_divide(
-        job_summary["Quoted_Amount_Mode"], job_summary["Quoted_Time_Mode"]
-    )
-    job_summary = job_summary.sort_values("Actual_Revenue", ascending=False)
-
-    job_map = _job_label_map(df_filtered)
-    if job_summary.empty:
-        st.info("No job actuals in the selected window.")
-    else:
-        st.dataframe(job_summary, width="stretch", height=320)
-
-        st.markdown("**Job Drilldown**")
-        job_keys = job_summary[COL_JOB_KEY].astype(str).tolist()
-        default_job = st.session_state.get("job_drill_selected", job_keys[0])
-        with st.form("job_drill_form"):
-            selected_job = st.selectbox(
-                "Select a job for task-level detail",
-                options=job_keys,
-                index=job_keys.index(default_job) if default_job in job_keys else 0,
-                format_func=lambda k: job_map.get(k, k),
-                key="job_drill_input",
-            )
-            drill_apply = st.form_submit_button("Apply Job")
-        if drill_apply:
-            st.session_state["job_drill_selected"] = selected_job
-        selected_job = st.session_state.get("job_drill_selected", selected_job)
-
-        task_month_job = task_month[task_month[COL_JOB_KEY] == selected_job]
-        dim_job_task_quote_job = dim_job_task_quote[
-            dim_job_task_quote[COL_JOB_KEY] == selected_job
-        ]
-        quote_by_task_job = quote_by_task[quote_by_task[COL_JOB_KEY] == selected_job]
-
-        task_summary = build_task_summary(
-            task_month_job, dim_job_task_quote_job, filters["include_quote_only"]
-        )
-        task_summary = task_summary.merge(
-            quote_by_task_job, on=[COL_JOB_KEY, COL_TASK_KEY], how="left"
-        )
-        task_summary["Quoted_Amount_Mode"] = task_summary["Quoted_Amount_Mode"].where(
-            task_summary["Quoted_Amount_Mode"].notna(), task_summary[COL_QUOTED_AMOUNT]
-        )
-        task_summary["Quoted_Time_Mode"] = task_summary["Quoted_Time_Mode"].where(
-            task_summary["Quoted_Time_Mode"].notna(), task_summary[COL_QUOTED_TIME]
-        )
-        task_summary["Quoted_Rate_Mode"] = safe_divide(
-            task_summary["Quoted_Amount_Mode"], task_summary["Quoted_Time_Mode"]
-        )
-
-        task_label_col = next(
-            (c for c in ["[Job Task] Name", "Task Name", "Task"] if c in task_summary.columns),
-            COL_TASK_KEY,
-        )
-        task_summary = task_summary.sort_values("Actual_Profit", ascending=False)
-        st.subheader("Task View")
-        columns = [
-            COL_TASK_KEY,
-            task_label_col,
-            "Actual_Hours_Total",
-            "Actual_Revenue",
-            "Actual_Cost",
-            "Actual_Profit",
-            "Actual_Margin",
-            "Realized_Rate",
-            "Base_Cost_Rate",
-            "Quoted_Time_Mode",
-            "Quoted_Amount_Mode",
-            "Quoted_Rate_Mode",
-            "Unquoted_Work",
-            "Scope_Overrun",
-        ]
-        columns = [c for c in columns if c in task_summary.columns]
-        st.dataframe(task_summary[columns], width="stretch", height=320)
-
-render_data_integrity(
-    task_month,
-    unallocated,
-    dim_job_month_window,
-    dim_job_task_quote,
-    include_unallocated=filters["include_unallocated"],
-    quote_mode=quote_mode,
-    is_lifetime=is_lifetime,
+quote_rates = data["dim_job_task_quote"].merge(
+    data["job_task_rates"], on=[COL_JOB_KEY, COL_TASK_KEY], how="left"
 )
+
+quoted_revenue_earned = data["earned_task_month"]["Earned_Quoted_Amount"].sum(min_count=1)
+quoted_hours_earned = data["earned_task_month"]["Earned_Quoted_Hours"].sum(min_count=1)
+benchmark_earned = data["earned_task_month"]["Benchmark_Revenue"].sum(min_count=1)
+planned_cost_earned = data["earned_task_month"]["Planned_Cost"].sum(min_count=1)
+
+quoted_revenue_lifetime = quote_rates[COL_QUOTED_AMOUNT].sum(min_count=1)
+quoted_hours_lifetime = quote_rates[COL_QUOTED_TIME].sum(min_count=1)
+benchmark_lifetime = (quote_rates[COL_QUOTED_TIME] * quote_rates["Billable_Rate_Eff"]).sum(
+    min_count=1
+)
+planned_cost_lifetime = (quote_rates[COL_QUOTED_TIME] * quote_rates["Base_Rate_Eff"]).sum(
+    min_count=1
+)
+
+if quote_mode == "Lifetime Quote":
+    quoted_revenue = quoted_revenue_lifetime
+    quoted_hours = quoted_hours_lifetime
+    benchmark_revenue = benchmark_lifetime
+    planned_cost = planned_cost_lifetime
+    if data["task_month"].empty is False:
+        st.warning("Lifetime quote is not aligned with period actuals.")
+else:
+    quoted_revenue = quoted_revenue_earned
+    quoted_hours = quoted_hours_earned
+    benchmark_revenue = benchmark_earned
+    planned_cost = planned_cost_earned
+
+recognized_revenue = data["dim_job_month_window"][COL_AMOUNT].sum(min_count=1)
+actual_cost = data["task_month"][COL_COST].sum()
+actual_hours = data["task_month"][COL_HOURS].sum()
+profit = quoted_revenue - actual_cost
+margin = safe_divide(profit, quoted_revenue)
+quote_gap = benchmark_revenue - quoted_revenue
+quote_gap_pct = safe_divide(quote_gap, benchmark_revenue)
+
+unallocated_revenue = data["unallocated"][COL_ALLOCATED_REVENUE].sum()
+
+# Tabs
+TAB_TITLES = [
+    "Executive Summary",
+    "Trends",
+    "Drill-Down",
+    "Insights",
+    "Job Diagnosis",
+    "Profitability Drivers",
+    "Reconciliation",
+    "Smart Quote Builder",
+]
+
+(tab_exec, tab_trends, tab_drill, tab_insights, tab_job, tab_drivers, tab_recon, tab_quote) = st.tabs(TAB_TITLES)
+
+with tab_exec:
+    _render_callout("How to read: start with the KPI strip, then the FY trend, then the flags.")
+    row1 = st.columns(4)
+    row1[0].metric("Quoted Revenue", _fmt_currency(quoted_revenue))
+    row1[1].metric("Benchmark", _fmt_currency(benchmark_revenue))
+    row1[2].metric("Cost", _fmt_currency(actual_cost))
+    row1[3].metric("Margin $", _fmt_currency(profit))
+
+    row2 = st.columns(4)
+    row2[0].metric("Margin %", _fmt_pct(margin))
+    row2[1].metric("Quote Gap $", _fmt_currency(quote_gap))
+    row2[2].metric("Quote Gap %", _fmt_pct(quote_gap_pct))
+    row2[3].metric("Effective Rate", _fmt_rate(safe_divide(quoted_revenue, actual_hours)))
+
+    row3 = st.columns(4)
+    row3[0].metric("Cost Rate", _fmt_rate(safe_divide(actual_cost, actual_hours)))
+    row3[1].metric("Quoted Hours", _fmt_hours(quoted_hours))
+    row3[2].metric("Unallocated Revenue", _fmt_currency(unallocated_revenue))
+    row3[3].metric("Recognized Revenue", _fmt_currency(recognized_revenue))
+
+    st.subheader("FY Trend")
+    trend_df = data["earned_task_month"].copy()
+    if not trend_df.empty:
+        trend_df["FY_Label"] = trend_df["FY_Label"].astype(str)
+        fy_trend = (
+            trend_df.groupby("FY_Label", as_index=False)
+            .agg(
+                Revenue=("Earned_Quoted_Amount", "sum"),
+                Benchmark=("Benchmark_Revenue", "sum"),
+                Planned_Cost=("Planned_Cost", "sum"),
+            )
+            .sort_values("FY_Label")
+        )
+        cost_by_fy = (
+            data["task_month"].groupby("FY_Label", as_index=False)[COL_COST]
+            .sum()
+            .rename(columns={COL_COST: "Cost"})
+        )
+        fy_trend = fy_trend.merge(cost_by_fy, on="FY_Label", how="left")
+        fy_trend["Profit"] = fy_trend["Revenue"] - fy_trend["Cost"]
+        fy_trend["Margin"] = safe_divide(fy_trend["Profit"], fy_trend["Revenue"])
+        fy_trend["Quote_Gap_Pct"] = safe_divide(
+            fy_trend["Benchmark"] - fy_trend["Revenue"], fy_trend["Benchmark"]
+        )
+
+        chart = (
+            alt.Chart(fy_trend)
+            .mark_bar(color="#2b586e")
+            .encode(x="FY_Label:N", y="Revenue:Q", tooltip=["FY_Label", "Revenue", "Profit"])
+            .properties(height=260)
+        )
+        line_margin = (
+            alt.Chart(fy_trend)
+            .mark_line(color="#f2b544", point=True)
+            .encode(x="FY_Label:N", y=alt.Y("Margin:Q", axis=alt.Axis(format="%")))
+        )
+        line_gap = (
+            alt.Chart(fy_trend)
+            .mark_line(color="#cc5f5f", point=True)
+            .encode(x="FY_Label:N", y=alt.Y("Quote_Gap_Pct:Q", axis=alt.Axis(format="%")))
+        )
+        st.altair_chart(chart + line_margin + line_gap, width="stretch")
+    else:
+        st.info("No trend data for the selected FYs.")
+
+    st.subheader("Performance Flags")
+    job_summary = _group_metrics(data["task_month"], data["earned_task_month"], COL_JOB_KEY)
+    loss_jobs = job_summary[job_summary["Profit"] < 0].head(10)
+    underquoted_jobs = job_summary[job_summary["Quote_Gap"] > 0].head(10)
+    overrun_jobs = job_summary[job_summary["Overrun"] > 0].head(10)
+
+    col_flags = st.columns(3)
+    col_flags[0].dataframe(loss_jobs, width="stretch", height=240)
+    col_flags[1].dataframe(underquoted_jobs, width="stretch", height=240)
+    col_flags[2].dataframe(overrun_jobs, width="stretch", height=240)
+
+with tab_trends:
+    _render_callout("How to read: pick a metric, then look for breaks in FY and month.")
+    metric = st.selectbox(
+        "Metric",
+        ["Margin %", "Quote Gap %", "Revenue", "Effective Rate", "Hours Variance %"],
+    )
+    grain = filters.get("trend_grain", "FY")
+    trend_df = data["earned_task_month"].copy()
+    if trend_df.empty:
+        st.info("No trend data.")
+    else:
+        if grain == "FY":
+            group_col = "FY_Label"
+        else:
+            group_col = COL_MONTH_KEY
+
+        trend = (
+            trend_df.groupby(group_col, as_index=False)
+            .agg(
+                Revenue=("Earned_Quoted_Amount", "sum"),
+                Benchmark=("Benchmark_Revenue", "sum"),
+                Quoted_Hours=("Earned_Quoted_Hours", "sum"),
+            )
+        )
+        actual = (
+            data["task_month"].groupby(group_col, as_index=False)
+            .agg(Actual_Cost=(COL_COST, "sum"), Actual_Hours=(COL_HOURS, "sum"))
+        )
+        trend = trend.merge(actual, on=group_col, how="left")
+        trend["Profit"] = trend["Revenue"] - trend["Actual_Cost"]
+        trend["Margin"] = safe_divide(trend["Profit"], trend["Revenue"])
+        trend["Quote_Gap_Pct"] = safe_divide(
+            trend["Benchmark"] - trend["Revenue"], trend["Benchmark"]
+        )
+        trend["Effective_Rate"] = safe_divide(trend["Revenue"], trend["Actual_Hours"])
+        trend["Hours_Variance_Pct"] = safe_divide(
+            trend["Actual_Hours"] - trend["Quoted_Hours"], trend["Quoted_Hours"]
+        )
+
+        if metric == "Margin %":
+            y = "Margin"
+            ref = MARGIN_TARGET
+        elif metric == "Quote Gap %":
+            y = "Quote_Gap_Pct"
+            ref = 0
+        elif metric == "Revenue":
+            y = "Revenue"
+            ref = None
+        elif metric == "Effective Rate":
+            y = "Effective_Rate"
+            ref = None
+        else:
+            y = "Hours_Variance_Pct"
+            ref = 0
+
+        chart = (
+            alt.Chart(trend)
+            .mark_line(point=True, color="#2b586e")
+            .encode(
+                x=alt.X(f"{group_col}:T" if group_col == COL_MONTH_KEY else f"{group_col}:N"),
+                y=alt.Y(f"{y}:Q"),
+                tooltip=[group_col, y],
+            )
+            .properties(height=300)
+        )
+        if ref is not None:
+            ref_line = alt.Chart(pd.DataFrame({"ref": [ref]})).mark_rule(color="#cc5f5f").encode(y="ref:Q")
+            st.altair_chart(chart + ref_line, width="stretch")
+        else:
+            st.altair_chart(chart, width="stretch")
+
+with tab_drill:
+    _render_callout("How to read: start at department, then move to product and job.")
+    if "Department_Eff" in data["task_month"].columns:
+        dept_summary = _group_metrics(data["task_month"], data["earned_task_month"], "Department_Eff")
+        dept_summary = dept_summary.sort_values("Profit", ascending=False)
+        st.subheader("Department Scoreboard")
+        scatter = (
+            alt.Chart(dept_summary)
+            .mark_circle(size=120, opacity=0.7)
+            .encode(
+                x=alt.X("Quote_Gap_Pct:Q", title="Quote Gap %"),
+                y=alt.Y("Margin:Q", title="Margin %"),
+                size=alt.Size("Quoted_Revenue:Q", title="Quoted Revenue"),
+                color=alt.Color("Margin_Status:N"),
+                tooltip=["Department_Eff", "Margin", "Quote_Gap_Pct", "Quoted_Revenue"],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(scatter, width="stretch")
+        st.dataframe(dept_summary, width="stretch", height=260)
+    else:
+        st.info("No Department data available.")
+
+    st.subheader("Product within Department")
+    if "Department_Eff" in data["task_month"].columns:
+        with st.form("dept_select"):
+            dept_options = sorted(data["task_month"]["Department_Eff"].dropna().unique())
+            selected_dept = st.selectbox("Department", dept_options)
+            apply_dept = st.form_submit_button("Apply Department")
+        if apply_dept:
+            st.session_state["selected_dept"] = selected_dept
+        selected_dept = st.session_state.get("selected_dept", dept_options[0])
+    else:
+        selected_dept = None
+
+    if selected_dept and "Product_Key" in data["task_month"].columns:
+        dept_task_month = data["task_month"][data["task_month"]["Department_Eff"] == selected_dept]
+        dept_earned = data["earned_task_month"][
+            data["earned_task_month"]["Department_Eff"] == selected_dept
+        ]
+        product_summary = _group_metrics(dept_task_month, dept_earned, "Product_Key")
+        product_summary = product_summary.sort_values("Profit", ascending=False)
+        st.dataframe(product_summary, width="stretch", height=260)
+    else:
+        st.info("No Product data available.")
+
+    st.subheader("Job Portfolio")
+    job_summary = _group_metrics(data["task_month"], data["earned_task_month"], COL_JOB_KEY)
+    job_summary = job_summary.sort_values("Profit", ascending=False)
+    with st.form("job_filters"):
+        loss_only = st.checkbox("Loss-only")
+        underquoted_only = st.checkbox("Underquoted-only")
+        overrun_only = st.checkbox("Overrun-only")
+        apply_job_filters = st.form_submit_button("Apply Job Filters")
+    if apply_job_filters:
+        st.session_state["job_filters"] = (loss_only, underquoted_only, overrun_only)
+    loss_only, underquoted_only, overrun_only = st.session_state.get("job_filters", (False, False, False))
+    job_view = job_summary.copy()
+    if loss_only:
+        job_view = job_view[job_view["Profit"] < 0]
+    if underquoted_only:
+        job_view = job_view[job_view["Quote_Gap"] > 0]
+    if overrun_only:
+        job_view = job_view[job_view["Overrun"] > 0]
+    st.dataframe(job_view.head(25), width="stretch", height=320)
+
+    st.subheader("Task Breakdown")
+    job_map = _job_label_map(filtered)
+    job_keys = job_summary[COL_JOB_KEY].astype(str).tolist()
+    if job_keys:
+        with st.form("job_task_select"):
+            selected_job = st.selectbox(
+                "Job",
+                options=job_keys,
+                format_func=lambda k: job_map.get(k, k),
+            )
+            apply_job = st.form_submit_button("Apply Job")
+        if apply_job:
+            st.session_state["drill_job"] = selected_job
+        selected_job = st.session_state.get("drill_job", job_keys[0])
+
+        task_month_job = data["task_month"][data["task_month"][COL_JOB_KEY] == selected_job]
+        dim_job_task_quote_job = data["dim_job_task_quote"][
+            data["dim_job_task_quote"][COL_JOB_KEY] == selected_job
+        ]
+        task_summary = build_task_summary(
+            task_month_job, dim_job_task_quote_job, filters.get("include_quote_only", True)
+        )
+        st.dataframe(task_summary, width="stretch", height=320)
+
+with tab_insights:
+    _render_callout("How to read: a short action list based on the current FY window.")
+    insights = []
+    if margin is not None and margin < MARGIN_TARGET:
+        insights.append("Margin below target; reinforce pricing discipline on new quotes.")
+    if quote_gap_pct is not None and quote_gap_pct > QUOTE_GAP_RISK:
+        insights.append("Underquoting is material; tighten benchmark adherence.")
+    if actual_cost > planned_cost_earned:
+        insights.append("Delivery overruns exceed plan; review scope control and resourcing.")
+    if not insights:
+        insights.append("Performance is within target bands; monitor and scale best practices.")
+
+    for item in insights[:3]:
+        st.write(f"- {item}")
+
+    st.subheader("Top Underquoted Jobs")
+    underquoted_jobs = job_summary[job_summary["Quote_Gap"] > 0].head(10)
+    st.dataframe(underquoted_jobs, width="stretch", height=240)
+
+    st.subheader("Top Scope Creep Tasks")
+    task_summary_all = build_task_summary(
+        data["task_month"], data["dim_job_task_quote"], filters.get("include_quote_only", True)
+    )
+    scope_creep = task_summary_all[task_summary_all["Scope_Overrun"]].head(10)
+    st.dataframe(scope_creep, width="stretch", height=240)
+
+with tab_job:
+    _render_callout("How to read: pick a job to generate a short diagnosis.")
+    job_map = _job_label_map(filtered)
+    job_keys = sorted(filtered[COL_JOB_KEY].dropna().astype(str).unique())
+    if not job_keys:
+        st.info("No jobs available.")
+    else:
+        selected_job = st.selectbox("Job", options=job_keys, format_func=lambda k: job_map.get(k, k))
+        job_task_month = data["task_month"][data["task_month"][COL_JOB_KEY] == selected_job]
+        job_dim_quote = data["dim_job_task_quote"][data["dim_job_task_quote"][COL_JOB_KEY] == selected_job]
+        job_task_summary = build_task_summary(
+            job_task_month, job_dim_quote, filters.get("include_quote_only", True)
+        )
+        issues = []
+        if (job_task_summary["Actual_Margin"] < 0).any():
+            issues.append("Loss-making tasks detected.")
+        if job_task_summary["Scope_Overrun"].any():
+            issues.append("Scope creep present.")
+        if job_task_summary["Unquoted_Work"].any():
+            issues.append("Unquoted work present.")
+        if not issues:
+            issues.append("No major issues detected.")
+
+        st.write("Summary line: Profitability drivers captured below.")
+        st.write("Issues identified:")
+        for issue in issues:
+            st.write(f"- {issue}")
+        st.dataframe(job_task_summary, width="stretch", height=320)
+
+with tab_drivers:
+    _render_callout("How to read: compare the dollar impact of the three driver buckets.")
+    delivery_overrun = actual_cost - planned_cost_earned
+    underquoting = quote_gap
+    rate_erosion = benchmark_revenue - quoted_revenue
+    drivers = pd.DataFrame(
+        {
+            "Driver": ["Delivery Overrun", "Underquoting", "Rate Erosion"],
+            "Impact": [delivery_overrun, underquoting, rate_erosion],
+        }
+    )
+    st.bar_chart(drivers.set_index("Driver"))
+
+    st.subheader("Top Margin Erosion Jobs")
+    erosion_jobs = job_summary.sort_values("Profit").head(15)
+    st.dataframe(erosion_jobs, width="stretch", height=260)
+
+with tab_recon:
+    _render_callout("How to read: sanity checks to validate totals.")
+    render_data_integrity(
+        data["task_month"],
+        data["unallocated"],
+        data["dim_job_month_window"],
+        data["dim_job_task_quote"],
+        include_unallocated=filters.get("include_unallocated", True),
+        quote_mode=filters.get("quote_mode", "Earned Quote Proxy"),
+        is_lifetime=False,
+    )
+
+with tab_quote:
+    _render_callout("How to read: build a new quote from historical task patterns.")
+    st.write("Select department and product to build a reference task library.")
+    if "Department_Eff" in filtered.columns:
+        dept_options = sorted(filtered["Department_Eff"].dropna().unique())
+        selected_dept = st.selectbox("Department", dept_options)
+    else:
+        selected_dept = None
+
+    product_options = sorted(filtered["Product_Key"].dropna().unique())
+    selected_product = st.selectbox("Product", product_options)
+
+    reference = data["task_month_lifetime"]
+    if selected_dept:
+        reference = reference[reference["Department_Eff"] == selected_dept]
+    if selected_product:
+        reference = reference[reference["Product_Key"] == selected_product]
+
+    task_library = (
+        reference.groupby(COL_TASK_KEY, as_index=False)
+        .agg(
+            Actual_Hours=(COL_HOURS, "sum"),
+            Actual_Cost=(COL_COST, "sum"),
+            Job_Count=(COL_JOB_KEY, "nunique"),
+        )
+        .sort_values("Job_Count", ascending=False)
+    )
+    if task_library.empty:
+        st.info("No tasks available for this slice.")
+    else:
+        task_library = task_library.head(20)
+        task_library["Proposed_Hours"] = task_library["Actual_Hours"].round(0)
+        edited = st.data_editor(task_library, width="stretch", num_rows="dynamic")
+        total_hours = edited["Proposed_Hours"].sum()
+        avg_cost_rate = safe_divide(edited["Actual_Cost"].sum(), edited["Actual_Hours"].sum())
+        est_cost = total_hours * avg_cost_rate if avg_cost_rate else None
+        st.write(f"Proposed hours: {_fmt_hours(total_hours)}")
+        st.write(f"Estimated cost: {_fmt_currency(est_cost)}")

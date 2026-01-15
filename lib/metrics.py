@@ -83,6 +83,64 @@ def add_task_month_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def build_job_task_rates(
+    task_month_lifetime: pd.DataFrame, dim_job_task_quote: pd.DataFrame
+) -> pd.DataFrame:
+    actuals = (
+        task_month_lifetime.groupby([COL_JOB_KEY, COL_TASK_KEY], as_index=False)
+        .agg(Actual_Hours=(COL_HOURS, "sum"), Actual_Cost=(COL_COST, "sum"))
+    )
+    actuals["Actual_Cost_Rate"] = safe_divide(actuals["Actual_Cost"], actuals["Actual_Hours"])
+
+    rates = dim_job_task_quote.merge(actuals, on=[COL_JOB_KEY, COL_TASK_KEY], how="left")
+    rates["Billable_Rate_Eff"] = rates[COL_BILLABLE_RATE]
+    rates["Billable_Rate_Eff"] = rates["Billable_Rate_Eff"].where(
+        rates["Billable_Rate_Eff"].notna(), rates[COL_BILLABLE_RATE_QUOTE]
+    )
+    rates["Base_Rate_Eff"] = rates[COL_BASE_RATE]
+    rates["Base_Rate_Eff"] = rates["Base_Rate_Eff"].where(
+        rates["Base_Rate_Eff"].notna(), rates[COL_BASE_RATE_QUOTE]
+    )
+    rates["Base_Rate_Eff"] = rates["Base_Rate_Eff"].where(
+        rates["Base_Rate_Eff"].notna(), rates["Actual_Cost_Rate"]
+    )
+    return rates[
+        [
+            COL_JOB_KEY,
+            COL_TASK_KEY,
+            "Billable_Rate_Eff",
+            "Base_Rate_Eff",
+            "Actual_Cost_Rate",
+        ]
+    ]
+
+
+def add_earned_quote_task_month(
+    task_month_window: pd.DataFrame,
+    task_month_lifetime: pd.DataFrame,
+    dim_job_task_quote: pd.DataFrame,
+    job_task_rates: pd.DataFrame,
+) -> pd.DataFrame:
+    lifetime_hours = (
+        task_month_lifetime.groupby([COL_JOB_KEY, COL_TASK_KEY], as_index=False)[COL_HOURS]
+        .sum()
+        .rename(columns={COL_HOURS: "Lifetime_Hours"})
+    )
+    out = task_month_window.merge(lifetime_hours, on=[COL_JOB_KEY, COL_TASK_KEY], how="left")
+    out = out.merge(
+        dim_job_task_quote[[COL_JOB_KEY, COL_TASK_KEY, COL_QUOTED_TIME, COL_QUOTED_AMOUNT]],
+        on=[COL_JOB_KEY, COL_TASK_KEY],
+        how="left",
+    )
+    out = out.merge(job_task_rates, on=[COL_JOB_KEY, COL_TASK_KEY], how="left")
+    out["Hour_Share"] = safe_divide(out[COL_HOURS], out["Lifetime_Hours"])
+    out["Earned_Quoted_Amount"] = out[COL_QUOTED_AMOUNT] * out["Hour_Share"]
+    out["Earned_Quoted_Hours"] = out[COL_QUOTED_TIME] * out["Hour_Share"]
+    out["Benchmark_Revenue"] = out["Earned_Quoted_Hours"] * out["Billable_Rate_Eff"]
+    out["Planned_Cost"] = out["Earned_Quoted_Hours"] * out["Base_Rate_Eff"]
+    return out
+
+
 def weighted_average(value: pd.Series, weight: pd.Series):
     valid = weight.notna() & (weight > 0) & value.notna()
     if not valid.any():
