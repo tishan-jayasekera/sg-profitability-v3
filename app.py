@@ -109,6 +109,9 @@ actuals_window = df_filtered[
     & (df_filtered[COL_MONTH_KEY] >= start)
     & (df_filtered[COL_MONTH_KEY] <= end)
 ]
+st.caption(
+    f"Filtered rows: {len(df_filtered):,} | Actuals in window: {len(actuals_window):,}"
+)
 if actuals_window.empty:
     st.warning(
         "No actuals in the selected window. Showing quote-only data where available. "
@@ -278,11 +281,19 @@ else:
 
     st.markdown("**Job Drilldown**")
     job_keys = job_summary[COL_JOB_KEY].astype(str).tolist()
-    selected_job = st.selectbox(
-        "Select a job for task-level detail",
-        options=job_keys,
-        format_func=lambda k: job_map.get(k, k),
-    )
+    default_job = st.session_state.get("job_drill_selected", job_keys[0])
+    with st.form("job_drill_form"):
+        selected_job = st.selectbox(
+            "Select a job for task-level detail",
+            options=job_keys,
+            index=job_keys.index(default_job) if default_job in job_keys else 0,
+            format_func=lambda k: job_map.get(k, k),
+            key="job_drill_input",
+        )
+        drill_apply = st.form_submit_button("Apply Job")
+    if drill_apply:
+        st.session_state["job_drill_selected"] = selected_job
+    selected_job = st.session_state.get("job_drill_selected", selected_job)
 
     task_month_job = task_month[task_month[COL_JOB_KEY] == selected_job]
     dim_job_task_quote_job = dim_job_task_quote[dim_job_task_quote[COL_JOB_KEY] == selected_job]

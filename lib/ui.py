@@ -75,114 +75,105 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         lifetime_start = lifetime.min().date()
         lifetime_end = lifetime.max().date()
 
-    def _on_preset_change() -> None:
-        preset_value = st.session_state.get("date_preset", "Lifetime")
-        if preset_value == "Custom":
-            return
-        start, end = preset_range(preset_value, lifetime_start, lifetime_end)
-        st.session_state["date_range"] = (start, end)
+    if "applied_filters" not in st.session_state:
+        st.session_state["applied_filters"] = {}
+        st.session_state["applied_date_preset"] = "Lifetime"
+        st.session_state["applied_date_range"] = (lifetime_start, lifetime_end)
+        st.session_state["applied_include_unallocated"] = True
+        st.session_state["applied_include_quote_only"] = True
 
-    preset = st.sidebar.selectbox(
-        "Date Preset",
-        options=["Lifetime", "FY", "YTD", "Last 12m", "Custom"],
-        index=0,
-        key="date_preset",
-        on_change=_on_preset_change,
+    with st.sidebar.form("filters_form"):
+        preset = st.selectbox(
+            "Date Preset",
+            options=["Lifetime", "FY", "YTD", "Last 12m", "Custom"],
+            index=["Lifetime", "FY", "YTD", "Last 12m", "Custom"].index(
+                st.session_state.get("applied_date_preset", "Lifetime")
+            ),
+            key="date_preset_input",
+        )
+        date_default = st.session_state.get("applied_date_range", (lifetime_start, lifetime_end))
+        date_range = st.date_input(
+            "Date Range (Month_Key)",
+            value=date_default,
+            key="date_range_input",
+        )
+
+        include_unallocated = st.toggle(
+            "Include UNALLOCATED revenue",
+            value=st.session_state.get("applied_include_unallocated", True),
+            key="include_unallocated_input",
+        )
+        include_quote_only = st.toggle(
+            "Include QUOTE_ONLY tasks in tables",
+            value=st.session_state.get("applied_include_quote_only", True),
+            key="include_quote_only_input",
+        )
+
+        def _multiselect(label: str, column: str, key: str) -> list[str]:
+            if column not in df.columns:
+                return []
+            return st.multiselect(
+                label,
+                options=_sorted_unique(df[column]),
+                default=st.session_state.get("applied_filters", {}).get(key, []),
+                key=f"{key}_input",
+            )
+
+        selected_department = _multiselect("Department", "Department_Eff", "department")
+        selected_function = _multiselect("Function", "Function", "function")
+        selected_business_unit = _multiselect("Business Unit", "Business Unit", "business_unit")
+        selected_billable = _multiselect("Billable?", "Billable?", "billable")
+        selected_deliverable = _multiselect("Deliverable", "Deliverable", "deliverable")
+        selected_role = _multiselect("Role", "Role", "role")
+        selected_task = _multiselect("Task", "Task", "task")
+        selected_source = _multiselect("Revenue Source", "Source", "source")
+
+        applied = st.form_submit_button("Apply Filters")
+
+    if st.sidebar.button("Reset Filters"):
+        _reset_filters()
+        st.session_state["applied_filters"] = {}
+        st.session_state["applied_date_preset"] = "Lifetime"
+        st.session_state["applied_date_range"] = (lifetime_start, lifetime_end)
+        st.session_state["applied_include_unallocated"] = True
+        st.session_state["applied_include_quote_only"] = True
+
+    if applied:
+        st.session_state["applied_date_preset"] = preset
+        if preset == "Custom":
+            if isinstance(date_range, tuple) and len(date_range) == 2:
+                st.session_state["applied_date_range"] = date_range
+        else:
+            st.session_state["applied_date_range"] = preset_range(
+                preset, lifetime_start, lifetime_end
+            )
+        st.session_state["applied_include_unallocated"] = include_unallocated
+        st.session_state["applied_include_quote_only"] = include_quote_only
+        st.session_state["applied_filters"] = {
+            "department": selected_department,
+            "function": selected_function,
+            "business_unit": selected_business_unit,
+            "billable": selected_billable,
+            "deliverable": selected_deliverable,
+            "role": selected_role,
+            "task": selected_task,
+            "source": selected_source,
+        }
+
+    applied_filters = st.session_state.get("applied_filters", {})
+    start_date, end_date = st.session_state.get(
+        "applied_date_range", (lifetime_start, lifetime_end)
     )
 
-    if "date_range" in st.session_state:
-        date_default = st.session_state["date_range"]
-    else:
-        date_default = (
-            preset_range(preset, lifetime_start, lifetime_end)
-            if preset != "Custom"
-            else (lifetime_start, lifetime_end)
-        )
-
-    date_range = st.sidebar.date_input(
-        "Date Range (Month_Key)",
-        value=date_default,
-        key="date_range",
-    )
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        start_date, end_date = date_range
-    else:
-        start_date, end_date = lifetime_start, lifetime_end
-
-    include_unallocated = st.sidebar.toggle(
-        "Include UNALLOCATED revenue",
-        value=st.session_state.get("include_unallocated", True),
-        key="include_unallocated",
-    )
-    include_quote_only = st.sidebar.toggle(
-        "Include QUOTE_ONLY tasks in tables",
-        value=st.session_state.get("include_quote_only", True),
-        key="include_quote_only",
-    )
-
-    filters = {"start_date": start_date, "end_date": end_date}
-
-    if "Department_Eff" in df.columns:
-        filters["department"] = st.sidebar.multiselect(
-            "Department",
-            options=_sorted_unique(df["Department_Eff"]),
-            default=st.session_state.get("department", []),
-            key="department",
-        )
-    if "Function" in df.columns:
-        filters["function"] = st.sidebar.multiselect(
-            "Function",
-            options=_sorted_unique(df["Function"]),
-            default=st.session_state.get("function", []),
-            key="function",
-        )
-    if "Business Unit" in df.columns:
-        filters["business_unit"] = st.sidebar.multiselect(
-            "Business Unit",
-            options=_sorted_unique(df["Business Unit"]),
-            default=st.session_state.get("business_unit", []),
-            key="business_unit",
-        )
-    if "Billable?" in df.columns:
-        filters["billable"] = st.sidebar.multiselect(
-            "Billable?",
-            options=_sorted_unique(df["Billable?"]),
-            default=st.session_state.get("billable", []),
-            key="billable",
-        )
-    if "Deliverable" in df.columns:
-        filters["deliverable"] = st.sidebar.multiselect(
-            "Deliverable",
-            options=_sorted_unique(df["Deliverable"]),
-            default=st.session_state.get("deliverable", []),
-            key="deliverable",
-        )
-    if "Role" in df.columns:
-        filters["role"] = st.sidebar.multiselect(
-            "Role",
-            options=_sorted_unique(df["Role"]),
-            default=st.session_state.get("role", []),
-            key="role",
-        )
-    if "Task" in df.columns:
-        filters["task"] = st.sidebar.multiselect(
-            "Task",
-            options=_sorted_unique(df["Task"]),
-            default=st.session_state.get("task", []),
-            key="task",
-        )
-    if "Source" in df.columns:
-        filters["source"] = st.sidebar.multiselect(
-            "Revenue Source",
-            options=_sorted_unique(df["Source"]),
-            default=st.session_state.get("source", []),
-            key="source",
-        )
-
-    filters["include_unallocated"] = include_unallocated
-    filters["include_quote_only"] = include_quote_only
-    filters["lifetime_start"] = lifetime_start
-    filters["lifetime_end"] = lifetime_end
+    filters = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "include_unallocated": st.session_state.get("applied_include_unallocated", True),
+        "include_quote_only": st.session_state.get("applied_include_quote_only", True),
+        "lifetime_start": lifetime_start,
+        "lifetime_end": lifetime_end,
+    }
+    filters.update(applied_filters)
     return filters
 
 

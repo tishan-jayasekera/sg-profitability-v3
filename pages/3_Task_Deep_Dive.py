@@ -70,11 +70,19 @@ if not job_keys:
     st.info("No jobs available with the current filters.")
     st.stop()
 
-job_key = st.selectbox(
-    "Job",
-    options=job_keys,
-    format_func=lambda k: job_map.get(k, k),
-)
+default_job = st.session_state.get("task_job_selected", job_keys[0])
+with st.form("task_job_form"):
+    job_key = st.selectbox(
+        "Job",
+        options=job_keys,
+        index=job_keys.index(default_job) if default_job in job_keys else 0,
+        format_func=lambda k: job_map.get(k, k),
+        key="task_job_input",
+    )
+    task_apply = st.form_submit_button("Apply Job")
+if task_apply:
+    st.session_state["task_job_selected"] = job_key
+job_key = st.session_state.get("task_job_selected", job_key)
 df_job = df_filtered[df_filtered[COL_JOB_KEY] == job_key]
 
 start = pd.to_datetime(filters["start_date"])
