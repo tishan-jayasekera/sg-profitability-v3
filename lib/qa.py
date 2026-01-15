@@ -23,8 +23,10 @@ def render_data_integrity(
     quote_mode: str,
     is_lifetime: bool,
     tolerance: float = 0.01,
+    wrap_expander: bool = True,
 ) -> None:
-    with st.expander("Data Integrity"):
+    container = st.expander("Data Integrity") if wrap_expander else st.container()
+    with container:
         st.subheader("Allocation Closure (Job-Month)")
         alloc = (
             task_month.groupby([COL_JOB_KEY, COL_MONTH_KEY])[COL_ALLOCATED_REVENUE]

@@ -181,6 +181,69 @@ def _group_metrics(
     return summary
 
 
+def _scope_info(filtered: pd.DataFrame, filters: dict) -> dict:
+    scope_level = filters.get("scope_level", "Company")
+    selections = {
+        "Department": st.session_state.get("drill_department"),
+        "Product": st.session_state.get("drill_product"),
+        "Job": st.session_state.get("drill_job"),
+    }
+    breadcrumb = ["Company"]
+    if selections["Department"]:
+        breadcrumb.append(selections["Department"])
+    if selections["Product"]:
+        breadcrumb.append(selections["Product"])
+    if selections["Job"]:
+        breadcrumb.append(selections["Job"])
+
+    scope_job_keys = None
+    scope_label = "Company"
+    warning = None
+    if scope_level == "Department":
+        dept = selections["Department"]
+        if "Department_Eff" not in filtered.columns:
+            warning = "Department field not available for this dataset."
+        elif dept:
+            scope_label = dept
+            scope_job_keys = set(
+                filtered.loc[filtered["Department_Eff"] == dept, COL_JOB_KEY].astype(str)
+            )
+        else:
+            warning = "Pick a Department in the Drill-Down tab to activate Department scope."
+    elif scope_level == "Product":
+        product = selections["Product"]
+        if "Product_Key" not in filtered.columns:
+            warning = "Product field not available for this dataset."
+        elif product:
+            scope_label = product
+            scope_job_keys = set(
+                filtered.loc[filtered["Product_Key"] == product, COL_JOB_KEY].astype(str)
+            )
+        else:
+            warning = "Pick a Product in the Drill-Down tab to activate Product scope."
+    elif scope_level == "Job":
+        job = selections["Job"]
+        if job:
+            scope_label = job
+            scope_job_keys = {str(job)}
+        else:
+            warning = "Pick a Job in Drill-Down or Job Diagnosis to activate Job scope."
+
+    return {
+        "level": scope_level,
+        "label": scope_label,
+        "job_keys": scope_job_keys,
+        "breadcrumb": " \u2192 ".join(breadcrumb),
+        "warning": warning,
+    }
+
+
+def _filter_by_job(df: pd.DataFrame, job_keys: set[str] | None) -> pd.DataFrame:
+    if job_keys is None or COL_JOB_KEY not in df.columns:
+        return df
+    return df[df[COL_JOB_KEY].astype(str).isin(job_keys)].copy()
+
+
 st.markdown(
     """
     <style>
@@ -226,6 +289,11 @@ if filtered.empty:
     st.stop()
 
 filtered, product_source = _resolve_product_key(filtered)
+
+if st.sidebar.button("Clear Drill Path"):
+    st.session_state.pop("drill_department", None)
+    st.session_state.pop("drill_product", None)
+    st.session_state.pop("drill_job", None)
 
 filters_version = st.session_state.get("filters_version", 0)
 cache = st.session_state.get("portfolio_cache")
@@ -278,33 +346,55 @@ else:
     st.session_state["portfolio_cache"] = data
     st.session_state["portfolio_cache_version"] = filters_version
 
+scope = _scope_info(filtered, filters)
+scope_level = scope["level"]
+scope_job_keys = scope["job_keys"]
+scope_data = {
+    "task_month": _filter_by_job(data["task_month"], scope_job_keys),
+    "unallocated": _filter_by_job(data["unallocated"], scope_job_keys),
+    "task_month_lifetime": _filter_by_job(data["task_month_lifetime"], scope_job_keys),
+    "dim_job_month_window": _filter_by_job(data["dim_job_month_window"], scope_job_keys),
+    "dim_job_task_quote": _filter_by_job(data["dim_job_task_quote"], scope_job_keys),
+    "job_task_rates": _filter_by_job(data["job_task_rates"], scope_job_keys),
+    "earned_task_month": _filter_by_job(data["earned_task_month"], scope_job_keys),
+}
+filtered_scope = _filter_by_job(filtered, scope_job_keys)
+
 fy_labels_effective = data["fy_labels_effective"]
+scope_fy_labels = (
+    sorted(scope_data["task_month"]["FY_Label"].dropna().astype(str).unique().tolist())
+    if not scope_data["task_month"].empty
+    else fy_labels_effective
+)
 if data["fallback_all_fy"]:
     st.warning(
         "No actuals for the selected FYs; showing all available FYs instead. "
         f"Available FYs: {', '.join(sorted(set(fy_labels_effective)))}"
     )
+if scope["warning"]:
+    st.info(scope["warning"])
 
 st.caption(
-    "Scope: Company | "
-    f"FYs: {', '.join(fy_labels_effective)} | "
+    f"Scope: {scope['level']} ({scope['label']}) | "
+    f"FYs: {', '.join(scope_fy_labels)} | "
     f"Quote mode: {filters.get('quote_mode', 'Earned Quote Proxy')} | "
     f"Product key: {product_source}"
 )
+st.caption(f"Breadcrumbs: {scope['breadcrumb']}")
 
-if data["task_month"].empty:
-    st.warning("No actuals in the selected window. Try All FYs.")
+if scope_data["task_month"].empty:
+    st.warning("No actuals in the selected window for this scope. Try All FYs.")
 
 # Compute portfolio KPIs
 quote_mode = filters.get("quote_mode", "Earned Quote Proxy")
-quote_rates = data["dim_job_task_quote"].merge(
-    data["job_task_rates"], on=[COL_JOB_KEY, COL_TASK_KEY], how="left"
+quote_rates = scope_data["dim_job_task_quote"].merge(
+    scope_data["job_task_rates"], on=[COL_JOB_KEY, COL_TASK_KEY], how="left"
 )
 
-quoted_revenue_earned = data["earned_task_month"]["Earned_Quoted_Amount"].sum(min_count=1)
-quoted_hours_earned = data["earned_task_month"]["Earned_Quoted_Hours"].sum(min_count=1)
-benchmark_earned = data["earned_task_month"]["Benchmark_Revenue"].sum(min_count=1)
-planned_cost_earned = data["earned_task_month"]["Planned_Cost"].sum(min_count=1)
+quoted_revenue_earned = scope_data["earned_task_month"]["Earned_Quoted_Amount"].sum(min_count=1)
+quoted_hours_earned = scope_data["earned_task_month"]["Earned_Quoted_Hours"].sum(min_count=1)
+benchmark_earned = scope_data["earned_task_month"]["Benchmark_Revenue"].sum(min_count=1)
+planned_cost_earned = scope_data["earned_task_month"]["Planned_Cost"].sum(min_count=1)
 
 quoted_revenue_lifetime = quote_rates[COL_QUOTED_AMOUNT].sum(min_count=1)
 quoted_hours_lifetime = quote_rates[COL_QUOTED_TIME].sum(min_count=1)
@@ -320,7 +410,7 @@ if quote_mode == "Lifetime Quote":
     quoted_hours = quoted_hours_lifetime
     benchmark_revenue = benchmark_lifetime
     planned_cost = planned_cost_lifetime
-    if data["task_month"].empty is False:
+    if scope_data["task_month"].empty is False:
         st.warning("Lifetime quote is not aligned with period actuals.")
 else:
     quoted_revenue = quoted_revenue_earned
@@ -328,15 +418,38 @@ else:
     benchmark_revenue = benchmark_earned
     planned_cost = planned_cost_earned
 
-recognized_revenue = data["dim_job_month_window"][COL_AMOUNT].sum(min_count=1)
-actual_cost = data["task_month"][COL_COST].sum()
-actual_hours = data["task_month"][COL_HOURS].sum()
+recognized_revenue = scope_data["dim_job_month_window"][COL_AMOUNT].sum(min_count=1)
+actual_cost = scope_data["task_month"][COL_COST].sum()
+actual_hours = scope_data["task_month"][COL_HOURS].sum()
 profit = quoted_revenue - actual_cost
 margin = safe_divide(profit, quoted_revenue)
 quote_gap = benchmark_revenue - quoted_revenue
 quote_gap_pct = safe_divide(quote_gap, benchmark_revenue)
 
-unallocated_revenue = data["unallocated"][COL_ALLOCATED_REVENUE].sum()
+unallocated_revenue = scope_data["unallocated"][COL_ALLOCATED_REVENUE].sum()
+total_allocated = (
+    scope_data["task_month"][COL_ALLOCATED_REVENUE].sum() + unallocated_revenue
+)
+unallocated_pct = safe_divide(unallocated_revenue, total_allocated)
+billable_coverage = safe_divide(
+    scope_data["earned_task_month"]
+    .loc[scope_data["earned_task_month"]["Billable_Rate_Eff"].notna(), "Earned_Quoted_Hours"]
+    .sum(min_count=1),
+    quoted_hours_earned,
+)
+base_rate_coverage = safe_divide(
+    scope_data["earned_task_month"]
+    .loc[scope_data["earned_task_month"]["Base_Rate_Eff"].notna(), "Earned_Quoted_Hours"]
+    .sum(min_count=1),
+    quoted_hours_earned,
+)
+job_count = scope_data["task_month"][COL_JOB_KEY].nunique()
+
+# Precompute summaries used across tabs
+if scope_data["task_month"].empty:
+    job_summary = pd.DataFrame()
+else:
+    job_summary = _group_metrics(scope_data["task_month"], scope_data["earned_task_month"], COL_JOB_KEY)
 
 # Tabs
 TAB_TITLES = [
@@ -354,6 +467,15 @@ TAB_TITLES = [
 
 with tab_exec:
     _render_callout("How to read: start with the KPI strip, then the FY trend, then the flags.")
+    st.markdown(
+        f"**Headline:** {_status_margin(margin)} margin at {_fmt_pct(margin)}; "
+        f"quote gap {_status_quote_gap(quote_gap_pct)} at {_fmt_pct(quote_gap_pct)}."
+    )
+    st.write(
+        "- What happened: Margin and quote gap summarize pricing vs delivery health.\n"
+        "- Why: Compare benchmark to quoted revenue and planned vs actual cost.\n"
+        "- Where: Use flags to isolate loss, underquoted, and overrun jobs."
+    )
     row1 = st.columns(4)
     row1[0].metric("Quoted Revenue", _fmt_currency(quoted_revenue))
     row1[1].metric("Benchmark", _fmt_currency(benchmark_revenue))
@@ -372,8 +494,14 @@ with tab_exec:
     row3[2].metric("Unallocated Revenue", _fmt_currency(unallocated_revenue))
     row3[3].metric("Recognized Revenue", _fmt_currency(recognized_revenue))
 
+    row4 = st.columns(4)
+    row4[0].metric("Unallocated %", _fmt_pct(unallocated_pct))
+    row4[1].metric("Billable Coverage", _fmt_pct(billable_coverage))
+    row4[2].metric("Base Rate Coverage", _fmt_pct(base_rate_coverage))
+    row4[3].metric("Job Count", f"{job_count:,}")
+
     st.subheader("FY Trend")
-    trend_df = data["earned_task_month"].copy()
+    trend_df = scope_data["earned_task_month"].copy()
     if not trend_df.empty:
         trend_df["FY_Label"] = trend_df["FY_Label"].astype(str)
         fy_trend = (
@@ -386,7 +514,7 @@ with tab_exec:
             .sort_values("FY_Label")
         )
         cost_by_fy = (
-            data["task_month"].groupby("FY_Label", as_index=False)[COL_COST]
+            scope_data["task_month"].groupby("FY_Label", as_index=False)[COL_COST]
             .sum()
             .rename(columns={COL_COST: "Cost"})
         )
@@ -418,15 +546,17 @@ with tab_exec:
         st.info("No trend data for the selected FYs.")
 
     st.subheader("Performance Flags")
-    job_summary = _group_metrics(data["task_month"], data["earned_task_month"], COL_JOB_KEY)
-    loss_jobs = job_summary[job_summary["Profit"] < 0].head(10)
-    underquoted_jobs = job_summary[job_summary["Quote_Gap"] > 0].head(10)
-    overrun_jobs = job_summary[job_summary["Overrun"] > 0].head(10)
+    if job_summary.empty:
+        st.info("No jobs available for this scope.")
+    else:
+        loss_jobs = job_summary[job_summary["Profit"] < 0].head(10)
+        underquoted_jobs = job_summary[job_summary["Quote_Gap"] > 0].head(10)
+        overrun_jobs = job_summary[job_summary["Overrun"] > 0].head(10)
 
-    col_flags = st.columns(3)
-    col_flags[0].dataframe(loss_jobs, width="stretch", height=240)
-    col_flags[1].dataframe(underquoted_jobs, width="stretch", height=240)
-    col_flags[2].dataframe(overrun_jobs, width="stretch", height=240)
+        col_flags = st.columns(3)
+        col_flags[0].dataframe(loss_jobs, width="stretch", height=240)
+        col_flags[1].dataframe(underquoted_jobs, width="stretch", height=240)
+        col_flags[2].dataframe(overrun_jobs, width="stretch", height=240)
 
 with tab_trends:
     _render_callout("How to read: pick a metric, then look for breaks in FY and month.")
@@ -435,7 +565,7 @@ with tab_trends:
         ["Margin %", "Quote Gap %", "Revenue", "Effective Rate", "Hours Variance %"],
     )
     grain = filters.get("trend_grain", "FY")
-    trend_df = data["earned_task_month"].copy()
+    trend_df = scope_data["earned_task_month"].copy()
     if trend_df.empty:
         st.info("No trend data.")
     else:
@@ -453,7 +583,7 @@ with tab_trends:
             )
         )
         actual = (
-            data["task_month"].groupby(group_col, as_index=False)
+            scope_data["task_month"].groupby(group_col, as_index=False)
             .agg(Actual_Cost=(COL_COST, "sum"), Actual_Hours=(COL_HOURS, "sum"))
         )
         trend = trend.merge(actual, on=group_col, how="left")
@@ -501,73 +631,108 @@ with tab_trends:
 
 with tab_drill:
     _render_callout("How to read: start at department, then move to product and job.")
-    if "Department_Eff" in data["task_month"].columns:
-        dept_summary = _group_metrics(data["task_month"], data["earned_task_month"], "Department_Eff")
-        dept_summary = dept_summary.sort_values("Profit", ascending=False)
-        st.subheader("Department Scoreboard")
-        scatter = (
-            alt.Chart(dept_summary)
-            .mark_circle(size=120, opacity=0.7)
-            .encode(
-                x=alt.X("Quote_Gap_Pct:Q", title="Quote Gap %"),
-                y=alt.Y("Margin:Q", title="Margin %"),
-                size=alt.Size("Quoted_Revenue:Q", title="Quoted Revenue"),
-                color=alt.Color("Margin_Status:N"),
-                tooltip=["Department_Eff", "Margin", "Quote_Gap_Pct", "Quoted_Revenue"],
+    dept_available = "Department_Eff" in filtered.columns
+    product_available = "Product_Key" in filtered.columns
+
+    if scope_level == "Company":
+        if dept_available and not scope_data["task_month"].empty:
+            dept_summary = _group_metrics(
+                scope_data["task_month"], scope_data["earned_task_month"], "Department_Eff"
+            ).sort_values("Profit", ascending=False)
+            st.subheader("Department Scoreboard")
+            scatter = (
+                alt.Chart(dept_summary)
+                .mark_circle(size=120, opacity=0.7)
+                .encode(
+                    x=alt.X("Quote_Gap_Pct:Q", title="Quote Gap %"),
+                    y=alt.Y("Margin:Q", title="Margin %"),
+                    size=alt.Size("Quoted_Revenue:Q", title="Quoted Revenue"),
+                    color=alt.Color("Margin_Status:N"),
+                    tooltip=["Department_Eff", "Margin", "Quote_Gap_Pct", "Quoted_Revenue"],
+                )
+                .properties(height=320)
             )
-            .properties(height=320)
-        )
-        st.altair_chart(scatter, width="stretch")
-        st.dataframe(dept_summary, width="stretch", height=260)
-    else:
-        st.info("No Department data available.")
+            st.altair_chart(scatter, width="stretch")
+            st.dataframe(dept_summary, width="stretch", height=260)
+        else:
+            st.info("No Department data available.")
 
     st.subheader("Product within Department")
-    if "Department_Eff" in data["task_month"].columns:
-        with st.form("dept_select"):
-            dept_options = sorted(data["task_month"]["Department_Eff"].dropna().unique())
-            selected_dept = st.selectbox("Department", dept_options)
-            apply_dept = st.form_submit_button("Apply Department")
-        if apply_dept:
-            st.session_state["selected_dept"] = selected_dept
-        selected_dept = st.session_state.get("selected_dept", dept_options[0])
-    else:
-        selected_dept = None
-
-    if selected_dept and "Product_Key" in data["task_month"].columns:
-        dept_task_month = data["task_month"][data["task_month"]["Department_Eff"] == selected_dept]
-        dept_earned = data["earned_task_month"][
-            data["earned_task_month"]["Department_Eff"] == selected_dept
+    selected_dept = None
+    if dept_available:
+        dept_options = sorted(filtered["Department_Eff"].dropna().unique())
+        if dept_options:
+            with st.form("dept_select"):
+                selected_dept = st.selectbox("Department", dept_options)
+                apply_dept = st.form_submit_button("Apply Department")
+            if apply_dept:
+                st.session_state["drill_department"] = selected_dept
+            selected_dept = st.session_state.get("drill_department", selected_dept)
+        else:
+            st.info("No departments available.")
+    if selected_dept and product_available:
+        dept_task_month = scope_data["task_month"][
+            scope_data["task_month"]["Department_Eff"] == selected_dept
         ]
-        product_summary = _group_metrics(dept_task_month, dept_earned, "Product_Key")
-        product_summary = product_summary.sort_values("Profit", ascending=False)
+        dept_earned = scope_data["earned_task_month"][
+            scope_data["earned_task_month"]["Department_Eff"] == selected_dept
+        ]
+        product_summary = _group_metrics(dept_task_month, dept_earned, "Product_Key").sort_values(
+            "Profit", ascending=False
+        )
         st.dataframe(product_summary, width="stretch", height=260)
+    elif product_available:
+        st.info("Pick a Department to view product performance.")
     else:
         st.info("No Product data available.")
 
+    st.subheader("Product Selection")
+    if product_available:
+        product_options = sorted(filtered["Product_Key"].dropna().unique())
+        if product_options:
+            with st.form("product_select"):
+                selected_product = st.selectbox("Product", product_options)
+                apply_product = st.form_submit_button("Apply Product")
+            if apply_product:
+                st.session_state["drill_product"] = selected_product
+            selected_product = st.session_state.get("drill_product", selected_product)
+        else:
+            st.info("No products available.")
+            selected_product = None
+    else:
+        selected_product = None
+
     st.subheader("Job Portfolio")
-    job_summary = _group_metrics(data["task_month"], data["earned_task_month"], COL_JOB_KEY)
-    job_summary = job_summary.sort_values("Profit", ascending=False)
-    with st.form("job_filters"):
-        loss_only = st.checkbox("Loss-only")
-        underquoted_only = st.checkbox("Underquoted-only")
-        overrun_only = st.checkbox("Overrun-only")
-        apply_job_filters = st.form_submit_button("Apply Job Filters")
-    if apply_job_filters:
-        st.session_state["job_filters"] = (loss_only, underquoted_only, overrun_only)
-    loss_only, underquoted_only, overrun_only = st.session_state.get("job_filters", (False, False, False))
-    job_view = job_summary.copy()
-    if loss_only:
-        job_view = job_view[job_view["Profit"] < 0]
-    if underquoted_only:
-        job_view = job_view[job_view["Quote_Gap"] > 0]
-    if overrun_only:
-        job_view = job_view[job_view["Overrun"] > 0]
-    st.dataframe(job_view.head(25), width="stretch", height=320)
+    if job_summary.empty:
+        st.info("No jobs available for this scope.")
+    else:
+        job_view = job_summary.copy()
+        if selected_product:
+            job_keys = set(
+                filtered.loc[filtered["Product_Key"] == selected_product, COL_JOB_KEY].astype(str)
+            )
+            job_view = job_view[job_view[COL_JOB_KEY].astype(str).isin(job_keys)]
+        with st.form("job_filters"):
+            loss_only = st.checkbox("Loss-only")
+            underquoted_only = st.checkbox("Underquoted-only")
+            overrun_only = st.checkbox("Overrun-only")
+            apply_job_filters = st.form_submit_button("Apply Job Filters")
+        if apply_job_filters:
+            st.session_state["job_filters"] = (loss_only, underquoted_only, overrun_only)
+        loss_only, underquoted_only, overrun_only = st.session_state.get(
+            "job_filters", (False, False, False)
+        )
+        if loss_only:
+            job_view = job_view[job_view["Profit"] < 0]
+        if underquoted_only:
+            job_view = job_view[job_view["Quote_Gap"] > 0]
+        if overrun_only:
+            job_view = job_view[job_view["Overrun"] > 0]
+        st.dataframe(job_view.head(25), width="stretch", height=320)
 
     st.subheader("Task Breakdown")
-    job_map = _job_label_map(filtered)
-    job_keys = job_summary[COL_JOB_KEY].astype(str).tolist()
+    job_map = _job_label_map(filtered_scope)
+    job_keys = job_summary[COL_JOB_KEY].astype(str).tolist() if not job_summary.empty else []
     if job_keys:
         with st.form("job_task_select"):
             selected_job = st.selectbox(
@@ -578,14 +743,18 @@ with tab_drill:
             apply_job = st.form_submit_button("Apply Job")
         if apply_job:
             st.session_state["drill_job"] = selected_job
-        selected_job = st.session_state.get("drill_job", job_keys[0])
+        selected_job = st.session_state.get("drill_job", selected_job)
 
-        task_month_job = data["task_month"][data["task_month"][COL_JOB_KEY] == selected_job]
-        dim_job_task_quote_job = data["dim_job_task_quote"][
-            data["dim_job_task_quote"][COL_JOB_KEY] == selected_job
+        task_month_job = scope_data["task_month"][
+            scope_data["task_month"][COL_JOB_KEY] == selected_job
+        ]
+        dim_job_task_quote_job = scope_data["dim_job_task_quote"][
+            scope_data["dim_job_task_quote"][COL_JOB_KEY] == selected_job
         ]
         task_summary = build_task_summary(
-            task_month_job, dim_job_task_quote_job, filters.get("include_quote_only", True)
+            task_month_job,
+            dim_job_task_quote_job,
+            filters.get("include_quote_only", True),
         )
         st.dataframe(task_summary, width="stretch", height=320)
 
@@ -605,26 +774,36 @@ with tab_insights:
         st.write(f"- {item}")
 
     st.subheader("Top Underquoted Jobs")
-    underquoted_jobs = job_summary[job_summary["Quote_Gap"] > 0].head(10)
-    st.dataframe(underquoted_jobs, width="stretch", height=240)
+    if job_summary.empty:
+        st.info("No jobs available for this scope.")
+    else:
+        underquoted_jobs = job_summary[job_summary["Quote_Gap"] > 0].head(10)
+        st.dataframe(underquoted_jobs, width="stretch", height=240)
 
     st.subheader("Top Scope Creep Tasks")
     task_summary_all = build_task_summary(
-        data["task_month"], data["dim_job_task_quote"], filters.get("include_quote_only", True)
+        scope_data["task_month"],
+        scope_data["dim_job_task_quote"],
+        filters.get("include_quote_only", True),
     )
     scope_creep = task_summary_all[task_summary_all["Scope_Overrun"]].head(10)
     st.dataframe(scope_creep, width="stretch", height=240)
 
 with tab_job:
     _render_callout("How to read: pick a job to generate a short diagnosis.")
-    job_map = _job_label_map(filtered)
-    job_keys = sorted(filtered[COL_JOB_KEY].dropna().astype(str).unique())
+    job_map = _job_label_map(filtered_scope)
+    job_keys = sorted(filtered_scope[COL_JOB_KEY].dropna().astype(str).unique())
     if not job_keys:
         st.info("No jobs available.")
     else:
         selected_job = st.selectbox("Job", options=job_keys, format_func=lambda k: job_map.get(k, k))
-        job_task_month = data["task_month"][data["task_month"][COL_JOB_KEY] == selected_job]
-        job_dim_quote = data["dim_job_task_quote"][data["dim_job_task_quote"][COL_JOB_KEY] == selected_job]
+        st.session_state["drill_job"] = selected_job
+        job_task_month = scope_data["task_month"][
+            scope_data["task_month"][COL_JOB_KEY] == selected_job
+        ]
+        job_dim_quote = scope_data["dim_job_task_quote"][
+            scope_data["dim_job_task_quote"][COL_JOB_KEY] == selected_job
+        ]
         job_task_summary = build_task_summary(
             job_task_month, job_dim_quote, filters.get("include_quote_only", True)
         )
@@ -658,34 +837,42 @@ with tab_drivers:
     st.bar_chart(drivers.set_index("Driver"))
 
     st.subheader("Top Margin Erosion Jobs")
-    erosion_jobs = job_summary.sort_values("Profit").head(15)
-    st.dataframe(erosion_jobs, width="stretch", height=260)
+    if job_summary.empty:
+        st.info("No jobs available for this scope.")
+    else:
+        erosion_jobs = job_summary.sort_values("Profit").head(15)
+        st.dataframe(erosion_jobs, width="stretch", height=260)
 
 with tab_recon:
     _render_callout("How to read: sanity checks to validate totals.")
     render_data_integrity(
-        data["task_month"],
-        data["unallocated"],
-        data["dim_job_month_window"],
-        data["dim_job_task_quote"],
+        scope_data["task_month"],
+        scope_data["unallocated"],
+        scope_data["dim_job_month_window"],
+        scope_data["dim_job_task_quote"],
         include_unallocated=filters.get("include_unallocated", True),
         quote_mode=filters.get("quote_mode", "Earned Quote Proxy"),
         is_lifetime=False,
+        wrap_expander=False,
     )
 
 with tab_quote:
     _render_callout("How to read: build a new quote from historical task patterns.")
     st.write("Select department and product to build a reference task library.")
-    if "Department_Eff" in filtered.columns:
-        dept_options = sorted(filtered["Department_Eff"].dropna().unique())
+    if "Department_Eff" in filtered_scope.columns:
+        dept_options = sorted(filtered_scope["Department_Eff"].dropna().unique())
         selected_dept = st.selectbox("Department", dept_options)
     else:
         selected_dept = None
 
-    product_options = sorted(filtered["Product_Key"].dropna().unique())
-    selected_product = st.selectbox("Product", product_options)
+    product_options = sorted(filtered_scope["Product_Key"].dropna().unique())
+    if product_options:
+        selected_product = st.selectbox("Product", product_options)
+    else:
+        st.info("No products available for this scope.")
+        selected_product = None
 
-    reference = data["task_month_lifetime"]
+    reference = scope_data["task_month_lifetime"]
     if selected_dept:
         reference = reference[reference["Department_Eff"] == selected_dept]
     if selected_product:
@@ -707,7 +894,20 @@ with tab_quote:
         task_library["Proposed_Hours"] = task_library["Actual_Hours"].round(0)
         edited = st.data_editor(task_library, width="stretch", num_rows="dynamic")
         total_hours = edited["Proposed_Hours"].sum()
+        actual_hours = edited["Actual_Hours"].sum()
         avg_cost_rate = safe_divide(edited["Actual_Cost"].sum(), edited["Actual_Hours"].sum())
         est_cost = total_hours * avg_cost_rate if avg_cost_rate else None
         st.write(f"Proposed hours: {_fmt_hours(total_hours)}")
         st.write(f"Estimated cost: {_fmt_currency(est_cost)}")
+        if actual_hours and total_hours < actual_hours * 0.9:
+            st.warning("Proposed hours are materially below historical actuals. Review scope.")
+
+render_data_integrity(
+    scope_data["task_month"],
+    scope_data["unallocated"],
+    scope_data["dim_job_month_window"],
+    scope_data["dim_job_task_quote"],
+    include_unallocated=filters.get("include_unallocated", True),
+    quote_mode=filters.get("quote_mode", "Earned Quote Proxy"),
+    is_lifetime=False,
+)

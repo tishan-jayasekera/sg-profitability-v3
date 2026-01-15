@@ -126,7 +126,14 @@ def add_earned_quote_task_month(
         .sum()
         .rename(columns={COL_HOURS: "Lifetime_Hours"})
     )
-    out = task_month_window.merge(lifetime_hours, on=[COL_JOB_KEY, COL_TASK_KEY], how="left")
+    out = task_month_window.copy()
+    out = out.merge(lifetime_hours, on=[COL_JOB_KEY, COL_TASK_KEY], how="left")
+
+    drop_cols = [COL_QUOTED_TIME, COL_QUOTED_AMOUNT, "Billable_Rate_Eff", "Base_Rate_Eff"]
+    drop_cols = [col for col in drop_cols if col in out.columns]
+    if drop_cols:
+        out = out.drop(columns=drop_cols)
+
     out = out.merge(
         dim_job_task_quote[[COL_JOB_KEY, COL_TASK_KEY, COL_QUOTED_TIME, COL_QUOTED_AMOUNT]],
         on=[COL_JOB_KEY, COL_TASK_KEY],
