@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from lib.constants import (
@@ -26,7 +27,7 @@ def safe_divide(n, d):
         if not isinstance(d, pd.Series):
             d = pd.Series(d, index=n.index)
         mask = d.notna() & (d != 0)
-        result = pd.Series(pd.NA, index=n.index, dtype="float64")
+        result = pd.Series(np.nan, index=n.index, dtype="float64")
         result.loc[mask] = n.loc[mask] / d.loc[mask]
         return result
     if d is None or pd.isna(d) or d == 0:
@@ -181,3 +182,4 @@ def compute_quote_by_task(
     quote["Quoted_Amount_Mode"] = quote[COL_QUOTED_AMOUNT] * quote["Hour_Share"]
     quote.loc[quote["Hour_Share"].isna(), ["Quoted_Time_Mode", "Quoted_Amount_Mode"]] = None
     return quote[[COL_JOB_KEY, COL_TASK_KEY, "Quoted_Time_Mode", "Quoted_Amount_Mode"]]
+
