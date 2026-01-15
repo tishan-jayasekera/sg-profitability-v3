@@ -121,6 +121,12 @@ def add_earned_quote_task_month(
     dim_job_task_quote: pd.DataFrame,
     job_task_rates: pd.DataFrame,
 ) -> pd.DataFrame:
+    if COL_QUOTED_TIME not in dim_job_task_quote.columns:
+        dim_job_task_quote = dim_job_task_quote.copy()
+        dim_job_task_quote[COL_QUOTED_TIME] = pd.NA
+    if COL_QUOTED_AMOUNT not in dim_job_task_quote.columns:
+        dim_job_task_quote = dim_job_task_quote.copy()
+        dim_job_task_quote[COL_QUOTED_AMOUNT] = pd.NA
     lifetime_hours = (
         task_month_lifetime.groupby([COL_JOB_KEY, COL_TASK_KEY], as_index=False)[COL_HOURS]
         .sum()
