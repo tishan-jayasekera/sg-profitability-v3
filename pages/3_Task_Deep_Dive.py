@@ -218,13 +218,13 @@ else:
         )
         .properties(height=260)
     )
-    st.altair_chart(pnl_chart, use_container_width=True)
+    st.altair_chart(pnl_chart, width="stretch")
 
     st.subheader("Rate Convergence")
     monthly["Realized_Rate"] = safe_divide(monthly["Revenue"], monthly["Hours"])
     monthly["Base_Cost_Rate"] = safe_divide(monthly["Cost"], monthly["Hours"])
     billable = (
-        task_month_sel.groupby(COL_MONTH_KEY)
+        task_month_sel.groupby(COL_MONTH_KEY)[["Billable_Rate_Eff", COL_HOURS]]
         .apply(
             lambda g: (g["Billable_Rate_Eff"] * g[COL_HOURS]).sum() / g[COL_HOURS].sum()
             if g[COL_HOURS].sum() > 0
@@ -251,7 +251,7 @@ else:
         )
         .properties(height=260)
     )
-    st.altair_chart(rate_chart, use_container_width=True)
+    st.altair_chart(rate_chart, width="stretch")
 
 st.subheader("Diagnostics")
 ghost = task_month_sel[task_month_sel["Ghost_Work_Month"]]
@@ -263,7 +263,7 @@ with diag_cols[0]:
     if not ghost.empty:
         st.dataframe(
             ghost[[COL_MONTH_KEY, COL_HOURS, COL_ALLOCATED_REVENUE]],
-            use_container_width=True,
+            width="stretch",
             height=200,
         )
     else:
@@ -273,7 +273,7 @@ with diag_cols[1]:
     if not below.empty:
         st.dataframe(
             below[[COL_MONTH_KEY, COL_ALLOCATED_REVENUE, COL_COST, "Realized_Rate", "Base_Cost_Rate"]],
-            use_container_width=True,
+            width="stretch",
             height=200,
         )
     else:
@@ -286,7 +286,7 @@ if "[Staff] Name" in task_month_sel.columns:
         .apply(lambda s: ", ".join(sorted(set(s.dropna().astype(str)))))
         .reset_index(name="Staff")
     )
-    st.dataframe(staff, use_container_width=True, height=240)
+    st.dataframe(staff, width="stretch", height=240)
 else:
     st.write("No staff data available in this dataset.")
 

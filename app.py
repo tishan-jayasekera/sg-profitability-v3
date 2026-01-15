@@ -244,8 +244,8 @@ else:
         .properties(height=260)
     )
 
-    st.altair_chart(rev_chart, use_container_width=True)
-    st.altair_chart(hours_chart, use_container_width=True)
+    st.altair_chart(rev_chart, width="stretch")
+    st.altair_chart(hours_chart, width="stretch")
 
 st.subheader("Rate Convergence")
 exclude_negative = st.toggle(
@@ -278,7 +278,7 @@ else:
         )
         .properties(height=260)
     )
-    st.altair_chart(rate_chart, use_container_width=True)
+    st.altair_chart(rate_chart, width="stretch")
 
 st.subheader("Task Contribution (Ranked by Profit)")
 task_summary = build_task_summary(
@@ -321,7 +321,7 @@ columns = [
     "Scope_Overrun",
 ]
 columns = [c for c in columns if c in task_view.columns]
-st.dataframe(task_view[columns], use_container_width=True, height=340)
+st.dataframe(task_view[columns], width="stretch", height=340)
 
 st.subheader("Exceptions")
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -332,21 +332,21 @@ with tab1:
         (task_summary["Actual_Hours_Total"] > 0)
         & (task_summary["Actual_Revenue"] == 0)
     ]
-    st.dataframe(ghost[columns], use_container_width=True, height=240)
+    st.dataframe(ghost[columns], width="stretch", height=240)
 with tab2:
     below = task_summary[
         task_summary["Realized_Rate"] < task_summary["Base_Cost_Rate"]
     ]
-    st.dataframe(below[columns], use_container_width=True, height=240)
+    st.dataframe(below[columns], width="stretch", height=240)
 with tab3:
     unquoted = task_summary[task_summary["Unquoted_Work"]]
-    st.dataframe(unquoted[columns], use_container_width=True, height=240)
+    st.dataframe(unquoted[columns], width="stretch", height=240)
 with tab4:
     quote_only = task_summary[
         (task_summary["Actual_Hours_Total"].fillna(0) == 0)
         & (task_summary[COL_QUOTED_TIME] > 0)
     ]
-    st.dataframe(quote_only[columns], use_container_width=True, height=240)
+    st.dataframe(quote_only[columns], width="stretch", height=240)
 
 render_data_integrity(
     task_month,

@@ -54,7 +54,7 @@ def render_data_integrity(
         if failed:
             st.dataframe(
                 closure.sort_values("Diff", ascending=False).head(10),
-                use_container_width=True,
+                width="stretch",
             )
 
         st.subheader("Revenue Consistency (Job Total)")

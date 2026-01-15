@@ -21,8 +21,14 @@ from lib.constants import (
 
 def safe_divide(n, d):
     if isinstance(n, pd.Series) or isinstance(d, pd.Series):
-        result = n / d
-        return result.where(d.notna() & (d != 0))
+        if not isinstance(n, pd.Series):
+            n = pd.Series(n, index=d.index)
+        if not isinstance(d, pd.Series):
+            d = pd.Series(d, index=n.index)
+        mask = d.notna() & (d != 0)
+        result = pd.Series(pd.NA, index=n.index, dtype="float64")
+        result.loc[mask] = n.loc[mask] / d.loc[mask]
+        return result
     if d is None or pd.isna(d) or d == 0:
         return None
     return n / d
@@ -123,7 +129,7 @@ def compute_monthly_metrics(
     monthly["Base_Cost_Rate"] = safe_divide(monthly["Cost"], monthly["Hours"])
 
     billable = (
-        task_month.groupby(COL_MONTH_KEY)
+        task_month.groupby(COL_MONTH_KEY)[["Billable_Rate_Eff", COL_HOURS]]
         .apply(lambda g: weighted_average(g["Billable_Rate_Eff"], g[COL_HOURS]))
         .reset_index(name="Billable_Rate_Wtd")
     )

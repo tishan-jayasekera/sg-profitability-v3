@@ -203,7 +203,7 @@ waterfall_chart = (
     )
     .properties(height=320)
 )
-st.altair_chart(waterfall_chart, use_container_width=True)
+st.altair_chart(waterfall_chart, width="stretch")
 
 st.subheader("Drivers")
 driver_cols = st.columns(3)
@@ -220,21 +220,21 @@ with driver_cols[0]:
     st.markdown("**Discounting Erosion by Task**")
     st.dataframe(
         top_discount[[COL_TASK_KEY, task_label_col, "Discounting_Erosion_Task"]],
-        use_container_width=True,
+        width="stretch",
         height=260,
     )
 with driver_cols[1]:
     st.markdown("**Delivery Overrun by Task**")
     st.dataframe(
         top_overrun[[COL_TASK_KEY, task_label_col, "Delivery_Overrun_Task"]],
-        use_container_width=True,
+        width="stretch",
         height=260,
     )
 with driver_cols[2]:
     st.markdown("**Revenue Leakage by Task**")
     st.dataframe(
         top_leakage[[COL_TASK_KEY, task_label_col, "Leakage_Task"]],
-        use_container_width=True,
+        width="stretch",
         height=260,
     )
 
@@ -257,7 +257,7 @@ scatter_chart = (
     )
     .properties(height=320)
 )
-st.altair_chart(scatter_chart, use_container_width=True)
+st.altair_chart(scatter_chart, width="stretch")
 
 st.subheader("Coverage & Integrity")
 billable_coverage = safe_divide(
