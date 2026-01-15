@@ -44,6 +44,23 @@ def _preset_range(preset: str, lifetime_start: date, lifetime_end: date) -> tupl
     return lifetime_start, lifetime_end
 
 
+FILTER_KEYS = [
+    "department",
+    "function",
+    "business_unit",
+    "billable",
+    "deliverable",
+    "role",
+    "task",
+    "source",
+]
+
+
+def _reset_filters() -> None:
+    for key in FILTER_KEYS:
+        st.session_state[key] = []
+
+
 def render_sidebar(df: pd.DataFrame) -> dict:
     st.sidebar.header("Filters")
 
@@ -75,18 +92,25 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         index=0,
         key="date_preset",
     )
+    if st.session_state.get("job_key_prev") != job_key:
+        _reset_filters()
+        st.session_state["date_preset"] = "Lifetime"
+        st.session_state["date_range"] = (lifetime_start, lifetime_end)
+        st.session_state["job_key_prev"] = job_key
+        preset = "Lifetime"
+
     if preset != "Custom":
-        date_range = _preset_range(preset, lifetime_start, lifetime_end)
-        st.session_state["date_range"] = date_range
+        desired_range = _preset_range(preset, lifetime_start, lifetime_end)
+        if st.session_state.get("date_range") != desired_range:
+            st.session_state["date_range"] = desired_range
 
     date_range = st.sidebar.date_input(
         "Date Range (Month_Key)",
         value=st.session_state.get("date_range", (lifetime_start, lifetime_end)),
-        key="date_range_input",
+        key="date_range",
     )
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = date_range
-        st.session_state["date_range"] = (start_date, end_date)
     else:
         start_date, end_date = lifetime_start, lifetime_end
 

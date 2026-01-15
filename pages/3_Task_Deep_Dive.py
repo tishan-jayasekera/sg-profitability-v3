@@ -61,6 +61,10 @@ actuals_window = df_job[
     & (df_job[COL_MONTH_KEY] >= start)
     & (df_job[COL_MONTH_KEY] <= end)
 ]
+if actuals_window.empty:
+    st.warning(
+        "No actuals in the selected window. Showing quote-only data where available."
+    )
 task_month = actuals_window[actuals_window[COL_TASK_KEY] != "__UNALLOCATED__"].copy()
 unallocated = actuals_window[actuals_window[COL_TASK_KEY] == "__UNALLOCATED__"].copy()
 task_month = add_task_month_metrics(task_month)

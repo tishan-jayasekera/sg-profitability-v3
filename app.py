@@ -73,8 +73,10 @@ actuals_window = df_job[
     & (df_job[COL_MONTH_KEY] <= end)
 ]
 if actuals_window.empty:
-    st.info("No actuals in the selected window.")
-    st.stop()
+    st.warning(
+        "No actuals in the selected window. Showing quote-only data where available. "
+        "Try resetting filters or choosing the Lifetime preset for actuals."
+    )
 
 task_month = actuals_window[actuals_window[COL_TASK_KEY] != "__UNALLOCATED__"].copy()
 unallocated = actuals_window[actuals_window[COL_TASK_KEY] == "__UNALLOCATED__"].copy()
@@ -200,47 +202,50 @@ row3[3].metric(
 
 st.subheader("Monthly Performance")
 monthly = compute_monthly_metrics(task_month, unallocated, filters["include_unallocated"])
-metric_map = {
-    "Revenue": "Revenue",
-    "Cost": "Cost",
-    "Unallocated_Revenue": "Unallocated Revenue",
-}
-rev_cols = ["Revenue", "Cost"]
-if filters["include_unallocated"]:
-    rev_cols.append("Unallocated_Revenue")
-rev_long = monthly.melt(
-    id_vars=[COL_MONTH_KEY],
-    value_vars=rev_cols,
-    var_name="Metric",
-    value_name="Value",
-)
-rev_long["Metric"] = rev_long["Metric"].map(metric_map).fillna(rev_long["Metric"])
-
-rev_chart = (
-    alt.Chart(rev_long)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X(f"{COL_MONTH_KEY}:T", title="Month"),
-        y=alt.Y("Value:Q", title="Amount"),
-        color="Metric:N",
-        tooltip=[COL_MONTH_KEY, "Metric", "Value"],
+if monthly.empty:
+    st.info("No monthly actuals to chart for this window.")
+else:
+    metric_map = {
+        "Revenue": "Revenue",
+        "Cost": "Cost",
+        "Unallocated_Revenue": "Unallocated Revenue",
+    }
+    rev_cols = ["Revenue", "Cost"]
+    if filters["include_unallocated"]:
+        rev_cols.append("Unallocated_Revenue")
+    rev_long = monthly.melt(
+        id_vars=[COL_MONTH_KEY],
+        value_vars=rev_cols,
+        var_name="Metric",
+        value_name="Value",
     )
-    .properties(height=260)
-)
+    rev_long["Metric"] = rev_long["Metric"].map(metric_map).fillna(rev_long["Metric"])
 
-hours_chart = (
-    alt.Chart(monthly)
-    .mark_line(point=True, color="#2b7c85")
-    .encode(
-        x=alt.X(f"{COL_MONTH_KEY}:T", title="Month"),
-        y=alt.Y("Hours:Q", title="Hours"),
-        tooltip=[COL_MONTH_KEY, "Hours"],
+    rev_chart = (
+        alt.Chart(rev_long)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(f"{COL_MONTH_KEY}:T", title="Month"),
+            y=alt.Y("Value:Q", title="Amount"),
+            color="Metric:N",
+            tooltip=[COL_MONTH_KEY, "Metric", "Value"],
+        )
+        .properties(height=260)
     )
-    .properties(height=260)
-)
 
-st.altair_chart(rev_chart, use_container_width=True)
-st.altair_chart(hours_chart, use_container_width=True)
+    hours_chart = (
+        alt.Chart(monthly)
+        .mark_line(point=True, color="#2b7c85")
+        .encode(
+            x=alt.X(f"{COL_MONTH_KEY}:T", title="Month"),
+            y=alt.Y("Hours:Q", title="Hours"),
+            tooltip=[COL_MONTH_KEY, "Hours"],
+        )
+        .properties(height=260)
+    )
+
+    st.altair_chart(rev_chart, use_container_width=True)
+    st.altair_chart(hours_chart, use_container_width=True)
 
 st.subheader("Rate Convergence")
 exclude_negative = st.toggle(
@@ -249,28 +254,31 @@ exclude_negative = st.toggle(
     help="Applies to rate chart only when revenue is <= 0.",
 )
 rate_df = monthly.copy()
-if exclude_negative:
-    rate_df = rate_df[rate_df["Revenue"] > 0]
-rate_df["Quoted_Rate"] = quoted_rate
-rate_cols = ["Realized_Rate", "Base_Cost_Rate", "Billable_Rate_Wtd", "Quoted_Rate"]
-rate_long = rate_df.melt(
-    id_vars=[COL_MONTH_KEY],
-    value_vars=[c for c in rate_cols if c in rate_df.columns],
-    var_name="Rate",
-    value_name="Value",
-)
-rate_chart = (
-    alt.Chart(rate_long)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X(f"{COL_MONTH_KEY}:T", title="Month"),
-        y=alt.Y("Value:Q", title="Rate"),
-        color="Rate:N",
-        tooltip=[COL_MONTH_KEY, "Rate", "Value"],
+if rate_df.empty:
+    st.info("No rate series available for this window.")
+else:
+    if exclude_negative:
+        rate_df = rate_df[rate_df["Revenue"] > 0]
+    rate_df["Quoted_Rate"] = quoted_rate
+    rate_cols = ["Realized_Rate", "Base_Cost_Rate", "Billable_Rate_Wtd", "Quoted_Rate"]
+    rate_long = rate_df.melt(
+        id_vars=[COL_MONTH_KEY],
+        value_vars=[c for c in rate_cols if c in rate_df.columns],
+        var_name="Rate",
+        value_name="Value",
     )
-    .properties(height=260)
-)
-st.altair_chart(rate_chart, use_container_width=True)
+    rate_chart = (
+        alt.Chart(rate_long)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(f"{COL_MONTH_KEY}:T", title="Month"),
+            y=alt.Y("Value:Q", title="Rate"),
+            color="Rate:N",
+            tooltip=[COL_MONTH_KEY, "Rate", "Value"],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(rate_chart, use_container_width=True)
 
 st.subheader("Task Contribution (Ranked by Profit)")
 task_summary = build_task_summary(
