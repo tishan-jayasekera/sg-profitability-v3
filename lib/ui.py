@@ -70,11 +70,30 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         st.error("No Job_Key values found.")
         st.stop()
 
+    def _compute_lifetime(job_key_value: str) -> tuple[date, date]:
+        job_df_local = df[df[COL_JOB_KEY] == job_key_value]
+        lifetime_series = job_df_local[job_df_local[COL_MONTH_KEY].notna()][COL_MONTH_KEY]
+        if lifetime_series.empty:
+            today = date.today()
+            return today, today
+        return lifetime_series.min().date(), lifetime_series.max().date()
+
+    def _on_job_change() -> None:
+        job_key_value = st.session_state.get("job_key")
+        if job_key_value is None:
+            return
+        _reset_filters()
+        lifetime_start, lifetime_end = _compute_lifetime(job_key_value)
+        st.session_state["date_preset"] = "Lifetime"
+        st.session_state["date_range"] = (lifetime_start, lifetime_end)
+        st.session_state["job_key_prev"] = job_key_value
+
     job_key = st.sidebar.selectbox(
         "Job",
         options=job_keys,
         format_func=lambda k: job_map.get(k, k),
         key="job_key",
+        on_change=_on_job_change,
     )
 
     job_df = df[df[COL_JOB_KEY] == job_key]
@@ -86,27 +105,33 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         lifetime_start = lifetime.min().date()
         lifetime_end = lifetime.max().date()
 
+    def _on_preset_change() -> None:
+        preset_value = st.session_state.get("date_preset", "Lifetime")
+        if preset_value == "Custom":
+            return
+        start, end = _preset_range(preset_value, lifetime_start, lifetime_end)
+        st.session_state["date_range"] = (start, end)
+
     preset = st.sidebar.selectbox(
         "Date Preset",
         options=["Lifetime", "FY", "YTD", "Last 12m", "Custom"],
         index=0,
         key="date_preset",
+        on_change=_on_preset_change,
     )
-    if st.session_state.get("job_key_prev") != job_key:
-        _reset_filters()
-        st.session_state["date_preset"] = "Lifetime"
-        st.session_state["date_range"] = (lifetime_start, lifetime_end)
-        st.session_state["job_key_prev"] = job_key
-        preset = "Lifetime"
 
-    if preset != "Custom":
-        desired_range = _preset_range(preset, lifetime_start, lifetime_end)
-        if st.session_state.get("date_range") != desired_range:
-            st.session_state["date_range"] = desired_range
+    if "date_range" in st.session_state:
+        date_default = st.session_state["date_range"]
+    else:
+        date_default = (
+            _preset_range(preset, lifetime_start, lifetime_end)
+            if preset != "Custom"
+            else (lifetime_start, lifetime_end)
+        )
 
     date_range = st.sidebar.date_input(
         "Date Range (Month_Key)",
-        value=st.session_state.get("date_range", (lifetime_start, lifetime_end)),
+        value=date_default,
         key="date_range",
     )
     if isinstance(date_range, tuple) and len(date_range) == 2:
