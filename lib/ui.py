@@ -189,6 +189,7 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         st.session_state["applied_include_unallocated"] = True
         st.session_state["applied_include_quote_only"] = True
         st.session_state["applied_quote_mode"] = "Earned Quote Proxy"
+        st.session_state["filters_version"] = st.session_state.get("filters_version", 0) + 1
     st.sidebar.caption("Changes apply when you click Apply Filters.")
 
     if applied:
@@ -216,9 +217,12 @@ def render_sidebar(df: pd.DataFrame) -> dict:
             "task": selected_task,
             "source": selected_source,
         }
+        st.session_state["filters_version"] = st.session_state.get("filters_version", 0) + 1
 
     applied_filters = st.session_state.get("applied_filters", {})
     fy_selection = st.session_state.get("applied_fy_labels", last_3_fys)
+    if not fy_selection:
+        fy_selection = last_3_fys or fy_labels
     start_date, end_date = lifetime_start, lifetime_end
     if "FY_Label" in df.columns and fy_selection:
         fy_df = df[df["FY_Label"].isin(fy_selection) & df[COL_MONTH_KEY].notna()]

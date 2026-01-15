@@ -76,6 +76,9 @@ st.caption("Decompose margin erosion into discounting, delivery overrun, and rev
 df = load_data_enriched()
 filters = render_sidebar(df)
 df_filtered = apply_filters(df, filters)
+if df_filtered.empty:
+    st.error("Current filters exclude all data. Use Reset Filters in the sidebar.")
+    st.stop()
 
 job_map = _job_label_map(df_filtered)
 job_keys = sorted(job_map.keys())
@@ -109,9 +112,23 @@ is_lifetime = set(fy_labels) == set(available_fys)
 actuals_window = df_job[
     df_job[COL_MONTH_KEY].notna() & df_job["FY_Label"].isin(fy_labels)
 ]
+fy_labels_effective = fy_labels
+if actuals_window.empty:
+    actuals_all = df_job[df_job[COL_MONTH_KEY].notna()]
+    if not actuals_all.empty:
+        st.warning(
+            "No actuals for the selected FYs; showing all available FYs instead. "
+            f"Available FYs: {', '.join(sorted(actuals_all['FY_Label'].dropna().unique()))}"
+        )
+        actuals_window = actuals_all
+        fy_labels_effective = (
+            actuals_all["FY_Label"].dropna().astype(str).unique().tolist()
+        )
+        is_lifetime = True
 if actuals_window.empty:
     st.warning(
-        "No actuals in the selected window. Showing quote-only data where available."
+        "No actuals in the selected window. Showing quote-only data where available. "
+        "Try All FYs for a full view."
     )
 task_month = actuals_window[actuals_window[COL_TASK_KEY] != "__UNALLOCATED__"].copy()
 unallocated = actuals_window[actuals_window[COL_TASK_KEY] == "__UNALLOCATED__"].copy()
@@ -121,7 +138,7 @@ task_month_lifetime = df_job[
 ].copy()
 
 dim_job_month = build_dim_job_month(df_job[df_job[COL_MONTH_KEY].notna()])
-dim_job_month_window = dim_job_month[dim_job_month["FY_Label"].isin(fy_labels)]
+dim_job_month_window = dim_job_month[dim_job_month["FY_Label"].isin(fy_labels_effective)]
 dim_job_task_quote = build_dim_job_task_quote(df_job)
 
 quote_mode = filters.get("quote_mode", "Earned Quote Proxy")

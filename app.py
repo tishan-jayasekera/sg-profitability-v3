@@ -100,55 +100,110 @@ scope_level = filters.get("scope_level", "Company")
 scope_order = ["Company", "Department", "Product", "Job", "Task"]
 max_scope_index = scope_order.index(scope_level) if scope_level in scope_order else 0
 df_filtered = apply_filters(df, filters)
+if df_filtered.empty:
+    st.error("Current filters exclude all data. Use Reset Filters in the sidebar.")
+    st.stop()
+
+filters_version = st.session_state.get("filters_version", 0)
+cache = st.session_state.get("exec_cache")
+cache_version = st.session_state.get("exec_cache_version")
+if cache and cache_version == filters_version:
+    fy_labels_effective = cache["fy_labels_effective"]
+    is_lifetime = cache["is_lifetime"]
+    actuals_window = cache["actuals_window"]
+    task_month = cache["task_month"]
+    unallocated = cache["unallocated"]
+    task_month_lifetime = cache["task_month_lifetime"]
+    dim_job_month = cache["dim_job_month"]
+    dim_job_month_window = cache["dim_job_month_window"]
+    dim_job_task_quote = cache["dim_job_task_quote"]
+    quote_by_task = cache["quote_by_task"]
+    actuals_empty = cache["actuals_empty"]
+    fallback_all_fy = cache["fallback_all_fy"]
+else:
+    fy_labels = filters.get("fy_labels", [])
+    available_fys = (
+        df_filtered["FY_Label"].dropna().astype(str).unique().tolist()
+        if "FY_Label" in df_filtered.columns
+        else []
+    )
+    is_lifetime = set(fy_labels) == set(available_fys)
+
+    actuals_window = df_filtered[
+        df_filtered[COL_MONTH_KEY].notna()
+        & df_filtered["FY_Label"].isin(fy_labels)
+    ]
+    fy_labels_effective = fy_labels
+    fallback_all_fy = False
+    if actuals_window.empty:
+        actuals_all = df_filtered[df_filtered[COL_MONTH_KEY].notna()]
+        if not actuals_all.empty:
+            fallback_all_fy = True
+            actuals_window = actuals_all
+            fy_labels_effective = (
+                actuals_all["FY_Label"].dropna().astype(str).unique().tolist()
+            )
+            is_lifetime = True
+    actuals_empty = actuals_window.empty
+
+    task_month = actuals_window[actuals_window[COL_TASK_KEY] != "__UNALLOCATED__"].copy()
+    unallocated = actuals_window[actuals_window[COL_TASK_KEY] == "__UNALLOCATED__"].copy()
+
+    task_month_lifetime = df_filtered[
+        df_filtered[COL_MONTH_KEY].notna() & (df_filtered[COL_TASK_KEY] != "__UNALLOCATED__")
+    ].copy()
+
+    dim_job_month = build_dim_job_month(df_filtered[df_filtered[COL_MONTH_KEY].notna()])
+    dim_job_month_window = dim_job_month[dim_job_month["FY_Label"].isin(fy_labels_effective)]
+    dim_job_task_quote = build_dim_job_task_quote(df_filtered)
+
+    quote_by_task = compute_quote_by_task(
+        filters.get("quote_mode", "Earned Quote Proxy"),
+        task_month,
+        task_month_lifetime,
+        dim_job_task_quote,
+    )
+
+    st.session_state["exec_cache"] = {
+        "fy_labels_effective": fy_labels_effective,
+        "is_lifetime": is_lifetime,
+        "actuals_window": actuals_window,
+        "task_month": task_month,
+        "unallocated": unallocated,
+        "task_month_lifetime": task_month_lifetime,
+        "dim_job_month": dim_job_month,
+        "dim_job_month_window": dim_job_month_window,
+        "dim_job_task_quote": dim_job_task_quote,
+        "quote_by_task": quote_by_task,
+        "actuals_empty": actuals_empty,
+        "fallback_all_fy": fallback_all_fy,
+    }
+    st.session_state["exec_cache_version"] = filters_version
+
+if fallback_all_fy:
+    st.warning(
+        "No actuals for the selected FYs; showing all available FYs instead. "
+        f"Available FYs: {', '.join(sorted(set(fy_labels_effective)))}"
+    )
 st.caption(
     "Scope: "
-    f"{scope_level} | FYs: {', '.join(filters.get('fy_labels', []))} | "
+    f"{scope_level} | FYs: {', '.join(fy_labels_effective)} | "
     f"Quote: {filters.get('quote_mode', 'Earned Quote Proxy')}"
 )
-
-start = pd.to_datetime(filters["start_date"])
-end = pd.to_datetime(filters["end_date"])
-fy_labels = filters.get("fy_labels", [])
-available_fys = (
-    df_filtered["FY_Label"].dropna().astype(str).unique().tolist()
-    if "FY_Label" in df_filtered.columns
-    else []
-)
-is_lifetime = set(fy_labels) == set(available_fys)
-
-actuals_window = df_filtered[
-    df_filtered[COL_MONTH_KEY].notna()
-    & df_filtered["FY_Label"].isin(fy_labels)
-]
 st.caption(
     f"Filtered rows: {len(df_filtered):,} | Actuals in window: {len(actuals_window):,}"
 )
-if actuals_window.empty:
+if actuals_empty:
     st.warning(
         "No actuals in the selected window. Showing quote-only data where available. "
-        "Try the Lifetime preset for a full view."
+        "Try All FYs for a full view."
     )
-
-task_month = actuals_window[actuals_window[COL_TASK_KEY] != "__UNALLOCATED__"].copy()
-unallocated = actuals_window[actuals_window[COL_TASK_KEY] == "__UNALLOCATED__"].copy()
-
-task_month_lifetime = df_filtered[
-    df_filtered[COL_MONTH_KEY].notna() & (df_filtered[COL_TASK_KEY] != "__UNALLOCATED__")
-].copy()
-
-dim_job_month = build_dim_job_month(df_filtered[df_filtered[COL_MONTH_KEY].notna()])
-dim_job_month_window = dim_job_month[dim_job_month["FY_Label"].isin(fy_labels)]
-dim_job_task_quote = build_dim_job_task_quote(df_filtered)
 
 quote_mode = filters.get("quote_mode", "Earned Quote Proxy")
 if not is_lifetime and quote_mode == "Lifetime Quote":
     st.warning(
         "You're viewing period actuals against lifetime quote. Consider Earned Quote Proxy."
     )
-
-quote_by_task = compute_quote_by_task(
-    quote_mode, task_month, task_month_lifetime, dim_job_task_quote
-)
 
 recognized_revenue = dim_job_month_window[COL_AMOUNT].sum(min_count=1)
 allocated_revenue = task_month[COL_ALLOCATED_REVENUE].sum()
